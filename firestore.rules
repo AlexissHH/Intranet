@@ -1,0 +1,223 @@
+rules_version = '2';
+
+// Reglas de la base Firestore de la Intranet (Instituto de Capacitación Legislativa).
+//
+// Modelo:
+//  - authorized_users/{identificador}: roles y estados de acceso. Doc ID = EMAIL.
+//  - Colecciones de contenido: solo administradores escriben; aprobados leen.
+//  - course_audits: el visitante puede escribir SOLO sus propios checks de cursada;
+//    jamás puede homologar (aprobado_admin) ni tocar certifiedAt/adminNotes de otro.
+//
+// Desplegar con: firebase deploy --only firestore:rules
+// o pegar el contenido en Firebase Console → Firestore Database → Rules.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ── Helpers de identidad ─────────────────────────────────────────────── */
+
+    // Google verificó el email de la cuenta.
+    function emailVerified() {
+      return request.auth != null
+        && request.auth.token.email_verified == true;
+    }
+
+    function currentEmail() {
+      return request.auth.token.email.toLower();
+    }
+
+    // Admins maestros institucionales. DEBE coincidir con DEFAULT_MASTER_ADMIN_EMAILS
+    // de lib/access-config.ts (y lo configurado en NEXT_PUBLIC_MASTER_ADMIN_EMAILS).
+    function isMasterAdmin() {
+      return emailVerified() && (
+        currentEmail() == 'alexishinojosa1600@gmail.com' ||
+        currentEmail() == 'instcapacitacionlegis@gmail.com'
+      );
+    }
+
+    // Doc propio en authorized_users (por email).
+    function ownUserDoc() {
+      return get(/databases/$(database)/documents/authorized_users/$(currentEmail())).data;
+    }
+
+    function hasUserDoc() {
+      return exists(/databases/$(database)/documents/authorized_users/$(currentEmail()));
+    }
+
+    function isAdmin() {
+      return isMasterAdmin() ||
+        (emailVerified() && hasUserDoc()
+          && ownUserDoc().role == 'administrador'
+          && ownUserDoc().status == 'aprobado');
+    }
+
+    function isApprovedUser() {
+      return isAdmin() ||
+        (emailVerified() && hasUserDoc() && ownUserDoc().status == 'aprobado');
+    }
+
+    // Modo de aprobación compartido (meta/approval_mode): cuando el administrador
+    // activa "auto_visitor", los registros nuevos aceptan su propio doc como aprobado.
+    function autoVisitorModeOn() {
+      return exists(/databases/$(database)/documents/meta/approval_mode)
+        && get(/databases/$(database)/documents/meta/approval_mode).data.mode == 'auto_visitor';
+    }
+
+    /* ── Usuarios autorizados ─────────────────────────────────────────────── */
+
+    match /authorized_users/{userEmail} {
+      // Lectura: la UI lista aprobados/pendientes; solo con sesión iniciada.
+      allow read: if request.auth != null;
+
+      // Auto-registro: cada usuario crea SOLO su propia ficha.
+      //  - pendiente: comportamiento por defecto (espera aprobación del admin).
+      //  - aprobado: solo si el modo compartido auto_visitor está activo.
+      allow create: if isMasterAdmin()
+        || (isAdmin() && request.resource.data.role != 'administrador')
+        || (emailVerified()
+            && userEmail == currentEmail()
+            && request.resource.data.role == 'visitante'
+            && request.resource.data.email == currentEmail()
+            && (request.resource.data.status == 'pendiente'
+                || (request.resource.data.status == 'aprobado' && autoVisitorModeOn())));
+
+      // Actualización: admins. Solo un MAESTRO puede crear/promover administradores
+      // o cambiar el status del doc de ADMINISTRADORES.
+      function changesRole() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'status']);
+      }
+      allow update: if isMasterAdmin()
+        || (isAdmin() && !changesRole())
+        || (isAdmin()
+            && changesRole()
+            && resource.data.role != 'administrador'
+            && request.resource.data.role != 'administrador'
+            && request.resource.data.status in ['aprobado', 'pendiente', 'rechazado']);
+
+      // Baja de usuarios: maestros o admins (no pueden borrar administradores).
+      allow delete: if isMasterAdmin()
+        || (isAdmin() && resource.data.role != 'administrador');
+    }
+
+    /* ── Contenido del instituto (escriben admins, leen aprobados) ────────── */
+
+    function approvedOrAdminRead() {
+      return isApprovedUser();
+    }
+
+    match /activities/{docId} {
+      allow read: if approvedOrAdminRead();
+      allow write: if isAdmin();
+    }
+
+    match /news/{docId} {
+      allow read: if approvedOrAdminRead();
+      allow write: if isAdmin();
+    }
+
+    match /courses/{docId} {
+      allow read: if approvedOrAdminRead();
+      allow write: if isAdmin();
+    }
+
+    match /programs/{docId} {
+      allow read: if approvedOrAdminRead();
+      allow write: if isAdmin();
+    }
+
+    match /resources/{docId} {
+      allow read: if approvedOrAdminRead();
+      allow write: if isAdmin();
+    }
+
+    match /links/{docId} {
+      allow read: if approvedOrAdminRead();
+      allow write: if isAdmin();
+    }
+
+    match /team/{docId} {
+      allow read: if approvedOrAdminRead();
+      allow write: if isAdmin();
+    }
+
+    match /institute_areas/{docId} {
+      allow read: if approvedOrAdminRead();
+      allow write: if isAdmin();
+    }
+
+    // Configuración institucional (doc individual settings/app)
+    match /settings/{docId} {
+      allow read: if approvedOrAdminRead();
+      allow write: if isAdmin();
+    }
+
+    // Lista de recursos eliminados (doc individual meta/deleted_resources)
+    match /meta/{docId} {
+      allow read: if approvedOrAdminRead();
+      allow write: if isAdmin();
+    }
+
+    /* ── Auditorías de cursada (anti-fraude) ──────────────────────────────── */
+
+    function ownAudit() {
+      return request.resource.data.agentEmail == currentEmail();
+    }
+
+    // Campos que un visitante puede alterar de su propia cursada.
+    function visitorAuditChangeIsLegit() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'checks',
+        'completedModulesCount',
+        'totalModules',
+        'isFullyCompleted',
+        'auditStatus',
+        'auditVerdict',
+        'firstCheckTimestamp',
+        'lastCheckTimestamp',
+        'timeDeltaMinutes',
+        'csatRating',
+        'csatComment',
+      ]);
+    }
+
+    match /course_audits/{docId} {
+      allow read: if approvedOrAdminRead();
+      allow create: if isAdmin()
+        || (isApprovedUser() && ownAudit()
+            && request.resource.data.auditStatus in ['en_progreso', 'consistente', 'alerta_simultanea']);
+      allow update: if isAdmin()
+        || (isApprovedUser() && ownAudit() && visitorAuditChangeIsLegit());
+      allow delete: if isAdmin();
+    }
+
+    /* ── Encuestas CSAT de visitas (creación anónima, una vez) ────────────── */
+
+    match /visit_csat/{token} {
+      // Lectura (resumen promedio en la ficha): solo usuarios aprobados o admins.
+      allow read: if isApprovedUser();
+
+      // Creación pública (sin login), una sola vez por token:
+      allow create: if token.matches('^csat-[a-z0-9-]{16,90}$')
+        && !exists(/databases/$(database)/documents/visit_csat/$(token))
+        && request.resource.data.keys().hasOnly(['activityId', 'rating', 'comment', 'submittedAt'])
+        && request.resource.data.activityId is string
+        && request.resource.data.activityId.size() >= 20
+        && request.resource.data.activityId.size() <= 90
+        && request.resource.data.rating is int
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5
+        && request.resource.data.comment is string
+        && request.resource.data.comment.size() <= 500
+        && request.resource.data.submittedAt is string
+        && request.resource.data.submittedAt.size() <= 40;
+
+      // Nadie puede modificar ni borrar respuestas ya enviadas (integridad del dato).
+      allow update, delete: if false;
+    }
+
+    /* ── Todo lo demás: denegado ──────────────────────────────────────────── */
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

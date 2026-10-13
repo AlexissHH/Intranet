@@ -1,0 +1,6 @@
+{
+  "name": "Intranet - Instituto de Capacitación Legislativa",
+  "description": "Portal de trabajo y gestión interna del Instituto de Capacitación Legislativa: agenda institucional, visitas escolares, capacitaciones, novedades, recursos y sincronización con Google Workspace.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,22 @@
+node_modules/
+.next/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Credenciales que JAMÁS deben subirse (por si en el futuro se agregan):
+*.pem
+*.p12
+*.pfx
+*firebase-adminsdk*.json
+serviceAccountKey.json
+key.json
+
+# Config local de herramientas
+.firebase/
+.vercel
+.idea/
+.vscode/
+*.tsbuildinfo
