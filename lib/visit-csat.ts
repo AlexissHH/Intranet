@@ -61,12 +61,15 @@ export function isCsatTokenFormatValid(token: string): boolean {
 
 /**
  * Registra la calificación en Firestore. Sin sesión (público): la creación anónima la
- * controla firestore.rules sobre visitas de una sola vez.
- * 'already' => la encuesta fue respondida antes (o las reglas bloquearon la creación).
+ * controla firestore.rules: token único, de un solo uso y anclado a la actividad.
+ * - 'ok'      => registrada.
+ * - 'already' => ese token ya tenía respuesta (uno solo por encuesta).
+ * - 'denied'  => las reglas rechazaron la creación (token inválido/viejo, actividad sin
+ *                token guardado, o reglas no publicadas): NO confundir con "ya respondida".
  */
 export async function saveCsatSurvey(
   survey: Omit<VisitCsatDoc, 'id'> & { id: string }
-): Promise<'ok' | 'already' | 'error'> {
+): Promise<'ok' | 'already' | 'denied' | 'error'> {
   const database = await ensureFirestoreReady();
   if (!database) return 'error';
   try {
@@ -78,7 +81,7 @@ export async function saveCsatSurvey(
     });
     return 'ok';
   } catch (e) {
-    if ((e as { code?: string })?.code === 'permission-denied') return 'already';
+    if ((e as { code?: string })?.code === 'permission-denied') return 'denied';
     console.error('No se pudo guardar la encuesta de satisfacción:', e);
     return 'error';
   }

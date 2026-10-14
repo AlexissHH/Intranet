@@ -64,6 +64,9 @@ export function CsatSurveyForm({ token }: CsatSurveyFormProps) {
       } else if (result === 'already') {
         setDone(true);
         setErrorMsg('Esta encuesta ya había sido respondida.');
+      } else if (result === 'denied') {
+        // Rechazado por reglas (token inválido/expirado o actividad sin encuesta activa).
+        setErrorMsg('Este enlace no corresponde a una encuesta vigente. Solicitá un enlace actualizado a la institución.');
       } else {
         setErrorMsg('No se pudo enviar tu respuesta. Revisá tu conexión e intentá de nuevo.');
       }
@@ -79,7 +82,10 @@ export function CsatSurveyForm({ token }: CsatSurveyFormProps) {
           <CheckCircle2 className="w-14 h-14 text-emerald-600 mx-auto" />
           <h1 className="text-xl font-extrabold text-[#001428]">¡Gracias por tu respuesta!</h1>
           <p className="text-sm text-slate-600">
-            Tu calificación ayudó al Instituto de Capacitación Legislative a mejorar Las visitas guiadas.
+            {errorMsg
+              ? // Caso 'already': la respuesta anterior se conservó íntegra.
+                errorMsg
+              : 'Tu calificación ayuda al Instituto de Capacitación Legislativa a mejorar las visitas guiadas.'}
           </p>
         </div>
       </div>

@@ -24,6 +24,17 @@ bun run typecheck  # verificación de tipos
 4. Probar en una vista previa: login con Google, PDF, vista de .docx y asistente de IA.
    Si la consola del navegador no muestra violaciones de CSP, poner `CSP_MODE=enforce`.
 
+## Desplegar en Netlify
+
+1. Importar el repositorio en Netlify (detcta Next.js: el repo incluye `netlify.toml` con el
+   runtime oficial `@netlify/plugin-nextjs`; build `npm run build`, publish `.next`).
+2. Cargar las variables de `.env.example` en *Site settings → Environment variables*
+   (`GEMINI_API_KEY` es secreta de servidor; las `NEXT_PUBLIC_*` se fijan al build).
+3. En Firebase Console → *Authentication → Authorized domains*, agregar el dominio de Netlify.
+4. Limitación honesta: las funciones sincrónicas de Netlify tienen un timeout default de 10 s
+   (extensible a ~26 s en la configuración del sitio). El modo "thinking" del asistente
+   puede excederlo en consultas largas; "fast" y "general" están detrás de ese margen.
+
 ## Seguridad: qué hay y qué falta
 
 - El asistente de IA está apagado por defecto: se enciende con `NEXT_PUBLIC_AI_ASSISTANT_ENABLED=true`. Su endpoint (`/api/gemini/generate`) exige un **ID token de Firebase verificado en el servidor**,
@@ -59,6 +70,14 @@ la app sigue funcionando y reintenta con cada cambio.
   auto-aprobarse, salvo que el modo compartido `auto_visitor` esté activado por un admin.
 - **Auditorías de cursada**: el visitante solo puede escribir sus propios checks (la lista de
   campos permitidos está acotada); homologar/certificar es exclusivo de admins.
+
+### Seguridad adicional: App Check
+
+Cuando se cargue una `recaptchaSiteKey` (en `firebase-applet-config.json` o `NEXT_PUBLIC_APPCHECK_SITE_KEY`),
+la app inicializa **Firebase App Check (reCAPTCHA v3)**: attestation de que las llamadas vienen
+de esta web, complemento oficial de Security Rules contra scripts externos que usen la API key
+pública. Sin site key, App Check queda inactivo. Para aplicar: revisar métricas en
+Firebase Console → App Check → *Aplicación* (Firestore), siguiendo la guía oficial.
 
 ### Limitaciones conocidas del modelo (última escritura gana)
 

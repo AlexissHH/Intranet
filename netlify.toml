@@ -1,0 +1,8 @@
+# Netlify — deploy de la Intranet (Next.js 15 App Router, OpenNext adapter).
+# Documentación: https://docs.netlify.com/build/frameworks/framework-setup-guides/nextjs/
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"

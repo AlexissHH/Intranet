@@ -33,6 +33,31 @@ import {
 } from 'lucide-react';
 import { ActivityItem, NewsItem, QuickLink, TeamMember, TrainingCourse, AgentCourseAudit } from '@/lib/mock-data';
 import { getLocalDateString, formatDateDisplay, getBirthdayCountdown, getShortWeekdayEs, getInstitutionalTodayParts } from '@/lib/utils';
+
+/** Máximo de comunicados visibles en Inicio: 5 en la semana corriente; 6 si hay avisos con fecha posterior a la semana. */
+const NEWS_HOME_LIMIT_SAME_WEEK = 5;
+const NEWS_HOME_LIMIT_WITH_FUTURE = 6;
+
+/**
+ * Convierte la fecha de un comunicado (se ingresa como texto es-AR: "13 oct 2026",
+ * "13 de oct. de 2026", o ISO YYYY-MM-DD) a "YYYY-MM-DD" comparable. null si no parsea.
+ */
+const NEWS_MONTH_HINTS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+
+function parseNewsDateToYmd(raw?: string): string | null {
+  const text = (raw || '').trim();
+  if (!text) return null;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const m = /^(\d{1,2})\s+(?:de\s+)?([a-záé]{3,12})\.?(?:\s+de\s+)?(\d{4})\.?$/i.exec(text);
+  if (!m) return null;
+  const day = Number(m[1]);
+  // "set" (setiembre rioplatense) equivale a "sep".
+  const monthHint = m[2].toLowerCase().slice(0, 3) === 'set' ? 'sep' : m[2].toLowerCase().slice(0, 3);
+  const monthIdx = NEWS_MONTH_HINTS.indexOf(monthHint);
+  if (monthIdx < 0 || !Number.isInteger(day) || day < 1 || day > 31) return null;
+  return `${m[3]}-${String(monthIdx + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
 import { getInstitutionalSettings, DEFAULT_SETTINGS, type InstitutionalSettings, type MetricGoalSettings, getCourseCsatStats, getCourseAudits } from '@/lib/storage';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
@@ -241,18 +266,53 @@ export function HomeSection({
       .slice(0, 4);
   }, [activities, todayStr]);
 
+  // Ventana de la semana corriente (lunes a domingo, zona institucional).
+  const weekBounds = React.useMemo(() => {
+    const { year, month, day } = getInstitutionalTodayParts();
+    const today = new Date(year, month, day, 12, 0, 0);
+    const dow = today.getDay();
+    const offsetToMonday = dow === 0 ? -6 : 1 - dow;
+    const monday = new Date(today);
+    monday.setDate(today.getDate() + offsetToMonday);
+    const sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+    const toYmd = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return { mondayYmd: toYmd(monday), sundayYmd: toYmd(sunday) };
+  }, []);
+
   // El aviso interno toma estrictamente el comunicado asignado por el admin (isAnnouncement === true)
   // o en su defecto el primer comunicado relevante si está activo en Datos Institucionales.
   const activeAnnouncementNews = news.find((n) => n.isAnnouncement) || news.find((n) => n.pinned) || news[0];
   const shouldShowInternalNotice = instSettings.isAnnouncementActive && Boolean(activeAnnouncementNews);
 
-  const sortedNews = [...news].sort((a, b) => {
-    if (a.isAnnouncement && !b.isAnnouncement) return -1;
-    if (!a.isAnnouncement && b.isAnnouncement) return 1;
-    if (a.pinned && !b.pinned) return -1;
-    if (!a.pinned && b.pinned) return 1;
-    return b.id.localeCompare(a.id);
-  });
+  const sortedNews = React.useMemo(() => {
+    return [...news].sort((a, b) => {
+      if (a.isAnnouncement && !b.isAnnouncement) return -1;
+      if (!a.isAnnouncement && b.isAnnouncement) return 1;
+      if (a.pinned && !b.pinned) return -1;
+      if (!a.pinned && b.pinned) return 1;
+      // Más nuevos primero por fecha real (mmmm parsing es-AR); sin fecha → al final.
+      const aYmd = parseNewsDateToYmd(a.date) || '0000-00-00';
+      const bYmd = parseNewsDateToYmd(b.date) || '0000-00-00';
+      if (aYmd !== bYmd) return bYmd.localeCompare(aYmd);
+      return b.id.localeCompare(a.id);
+    });
+  }, [news]);
+
+  // Límite visible en Inicio: 5 en la semana corriente; 6 si entre los primeros comunicados
+  // hay alguno con fecha posterior a la semana (avisos que venzan más adelante).
+  const visibleNews = React.useMemo(() => {
+    if (sortedNews.length <= NEWS_HOME_LIMIT_SAME_WEEK) return sortedNews;
+    const hasPostWeekNews = sortedNews
+      .slice(0, NEWS_HOME_LIMIT_WITH_FUTURE)
+      .some((n) => {
+        const ymd = parseNewsDateToYmd(n.date);
+        return Boolean(ymd) && Boolean(weekBounds.sundayYmd) && ymd! > weekBounds.sundayYmd;
+      });
+    return sortedNews.slice(0, hasPostWeekNews ? NEWS_HOME_LIMIT_WITH_FUTURE : NEWS_HOME_LIMIT_SAME_WEEK);
+  }, [sortedNews, weekBounds]);
+  const hiddenNewsCount = news.length - visibleNews.length;
 
   return (
     <div className="space-y-6">
@@ -579,7 +639,8 @@ export function HomeSection({
                   Novedades y Comunicados Internos
                 </h2>
                 <span className="text-[11px] font-semibold text-slate-500">
-                  ({sortedNews.length})
+                  ({visibleNews.length}
+                  {hiddenNewsCount > 0 ? ` de ${news.length} publicados` : ''})
                 </span>
               </div>
               {isAdmin && (
@@ -597,7 +658,7 @@ export function HomeSection({
             </div>
 
             <div className="space-y-4">
-              {sortedNews.map((item) => {
+              {visibleNews.map((item) => {
                 if (item.imageUrl) {
                   return (
                     <div

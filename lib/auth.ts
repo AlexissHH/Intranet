@@ -30,8 +30,10 @@ import {
   hasActivePushFailure,
   isSyncGateOpen,
   pushCollectionDiff,
+  pushMissingOnly,
   pushSingleDoc,
   registerGateOpenHandler,
+  runAccessDiagnostics,
   setFirestoreSyncGate,
   subscribeToCollection,
   subscribeToSingleDoc,
@@ -441,8 +443,16 @@ if (typeof window !== 'undefined') {
 }
 
 /** Gate de sincronización según la sesión real de Firebase (aprobado ↔ cerrado). */
+let diagnosticsRan = false;
+
 function applySyncGate(authorized: boolean): void {
   setFirestoreSyncGate(authorized);
+  // Un solo diagnóstico de acceso por sesión, con la sesión ADMIN:
+  // distingue "reglas no visibles para esta app/base" de "cuenta no admin".
+  if (authorized && !diagnosticsRan) {
+    diagnosticsRan = true;
+    void runAccessDiagnostics(cachedUserProfile?.email ?? '');
+  }
 }
 
 /** Convierte un doc remoto en un registro válido de usuario (o null si está corrupto). */
@@ -490,12 +500,32 @@ function applyRemoteUsers(remoteDocs: Record<string, unknown>[]): void {
     }
   }
 
+  // Reconciliación (una vez por sesión): sube a Firestore los usuarios que quedaron
+  // huérfanos por un push fallido (solo SUBE). Solo dispositivos administradores.
+  reconcileMissingUsers(remoteByEmail);
+
   try {
     localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(merged));
     notifyAuthorizedUsersChanged();
   } catch {
     // Ignore (cache local no encuentra espacio: la fuente sigue siendo Firestore)
   }
+}
+
+let usersReconciled = false;
+
+/** Recupera usuarios aprobados localmente que no llegaron al backend (justo admin). */
+function reconcileMissingUsers(remoteByEmail: Map<string, AuthorizedUser>): void {
+  if (usersReconciled || typeof window === 'undefined') return;
+  usersReconciled = true;
+  if (cachedUserProfile?.role !== 'administrador') return;
+  const localOnly = getAuthorizedUsers().filter((u) => !remoteByEmail.has(u.email.toLowerCase()));
+  if (localOnly.length === 0) return;
+  void pushMissingOnly(
+    AUTHORIZED_USERS_COLLECTION,
+    localOnly as unknown as Record<string, unknown>[],
+    userDocId
+  );
 }
 
 /** Notifica a la UI (evento storage) que la lista autorizada cambió desde el backend. */
@@ -572,6 +602,10 @@ export function saveAuthorizedUsers(users: AuthorizedUser[]): void {
   if (typeof window === 'undefined') return;
   try {
     localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+    // Notifica a la MISMA pestaña: los eventos 'storage' nativos solo cruzan entre
+    // pestañas, así que sin esto el panel admin (y otros lectores) quedaban con la
+    // lista vieja hasta recargar tras aprobar/rechazar/eliminar desde el modal.
+    notifyAuthorizedUsersChanged();
     ensureUsersSync();
     // Publicar en el backend compartido: un doc por EMAIL (identificador estable).
     void pushCollectionDiff(
@@ -1295,6 +1329,27 @@ export const googleSignIn = async (options?: GoogleSignInOptions): Promise<SignI
       const primaryProvider = createGoogleProvider(includeWorkspace, forceConsent);
       result = await signInWithPopup(activeAuth, primaryProvider);
     } catch (popupErr: unknown) {
+      /**
+       * Resilencia del popup: en dev, el overlay de Next pone COOP (Cross-Origin-Opener-Policy)
+       * y rompe la comunicación del popup de Google ("window.closed" bloqueado), además de los
+       * casos clásicos de popup bloqueado. En esos casos se continua AUTOMÁTICAMENTE por
+       * REDIRECCIÓN (mismo login, sin popup): es el flujo que ya existe para móvil.
+       */
+      const code = (popupErr as { code?: string } | null)?.code ?? '';
+      const popupFamilyCodes = [
+        'auth/popup-blocked',
+        'auth/popup-closed-by-user',
+        'auth/cancelled-popup-request',
+        'auth/operation-not-supported-in-this-environment',
+        'auth/popup-redirect-request-pending-failure',
+        'auth/timeout',
+      ];
+      if (popupFamilyCodes.includes(code)) {
+        await googleSignInWithRedirect(includeWorkspace);
+        // signInWithRedirect navega a Google y vuelve al callback en getRedirectResult:
+        // el promise queda congelado con intención (la página se va de ida).
+        return new Promise<SignInResult>(() => {});
+      }
       // If Workspace scopes caused an OAuth client/scope error or was blocked on an unverified project,
       // automatically retry with basic Google Identity (email + profile) so login succeeds.
       if (includeWorkspace) {
@@ -1302,7 +1357,9 @@ export const googleSignIn = async (options?: GoogleSignInOptions): Promise<SignI
           const fallbackProvider = createGoogleProvider(false, false);
           result = await signInWithPopup(activeAuth, fallbackProvider);
         } catch {
-          throw popupErr;
+          // La alternativa sin scopes también falló (p. ej. popup/COOP): redirección final.
+          await googleSignInWithRedirect(false);
+          return new Promise<SignInResult>(() => {});
         }
       } else {
         throw popupErr;
@@ -1606,15 +1663,40 @@ export const institutionalSignIn = (data: {
  * Devuelve null si no hay una sesión de Firebase (ej. ingreso institucional solo con email).
  * Firebase renueva el token automáticamente cuando está por vencer.
  */
+/**
+ * Espera a que Firebase resuelva su estado de autenticación (persistencia en IndexedDB
+ * puede tardar): evita la carrera de leer currentUser demasiado temprano y concluir
+ * "no hay sesión de Google" erróneamente (afectaba el diagnóstico y el ID token).
+ */
+async function waitForAuthUser(targetAuth: Auth): Promise<User | null> {
+  if (targetAuth.currentUser) return targetAuth.currentUser;
+  return new Promise((resolve) => {
+    const unsubscribe = onAuthStateChanged(targetAuth, (u) => {
+      unsubscribe();
+      resolve(u);
+    });
+  });
+}
+
 export const getFirebaseIdToken = async (): Promise<string | null> => {
   try {
-    const user = getActiveAuth().currentUser;
+    const user = await waitForAuthUser(getActiveAuth());
     return user ? await user.getIdToken() : null;
   } catch (e) {
     console.warn('No se pudo obtener el ID token de Firebase:', e);
     return null;
   }
 };
+
+/** Email REAL de la sesión de Google activa en Firebase ("" si no hay). */
+export function getFirebaseAuthEmail(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return getActiveAuth().currentUser?.email ?? '';
+  } catch {
+    return '';
+  }
+}
 
 export const getAccessToken = async (): Promise<string | null> => {
   // El token en memoria solo es válido hasta su vencimiento real (~1 h): pasado ese momento se

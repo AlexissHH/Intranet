@@ -17,9 +17,12 @@
  * funcionando contra el almacenamiento local.
  */
 import { getApp, getApps, type FirebaseApp } from 'firebase/app';
+import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
+import defaultFirebaseConfig from '../firebase-applet-config.json';
 import {
   collection,
   doc,
+  getDoc,
   getDocs,
   getFirestore,
   onSnapshot,
@@ -31,6 +34,7 @@ import {
 
 export const FIRESTORE_ERROR_EVENT = 'icl:firestore-error';
 export const FIRESTORE_READY_EVENT = 'icl:firestore-ready';
+export const FIRESTORE_DIAGNOSIS_EVENT = 'icl:firestore-diagnosis';
 
 /** Colección de encuestas de satisfacción de visitas (creación anónima según reglas). */
 export const VISIT_CSAT_COLLECTION = 'visit_csat';
@@ -43,6 +47,36 @@ const BATCH_MAX_OPS = 400;
 let db: Firestore | null = null;
 let readyReported = false;
 let lastReportedError = '';
+let lastReportedErrorAt = 0;
+let appCheckInitialized = false;
+
+/**
+ * App Check (reCAPTCHA v3): attestation de que las requests vienen DE ESTA app web.
+ * Complementa Security Rules para frenar scripts externos que golpearían Firestore
+ * directamente con la API key pública (cuota/spam). Se activa SOLO si hay site key
+ * configurada (firebase-applet-config.json: recaptchaSiteKey, o env NEXT_PUBLIC_APPCHECK_SITE_KEY);
+ * la *aplicación obligatoria* (enforcement) se activa desde Firebase Console → App Check
+ * después de revisar las métricas, según la guía oficial.
+ */
+function ensureAppCheck(): void {
+  if (appCheckInitialized || typeof window === 'undefined') return;
+  appCheckInitialized = true;
+  try {
+    const siteKey =
+      (defaultFirebaseConfig.recaptchaSiteKey || '').trim() ||
+      (process.env.NEXT_PUBLIC_APPCHECK_SITE_KEY || '').trim();
+    if (!siteKey) return; // Sin clave: comportamiento anterior (App Check desactivado).
+    initializeAppCheck(getApp(), {
+      provider: new ReCaptchaV3Provider(siteKey),
+      isTokenAutoRefreshEnabled: true,
+    });
+  } catch (e) {
+    console.warn('App Check no se pudo inicializar (función opcional):', e);
+  }
+}
+/** Repite el MISMO aviso si pasan N ms (un push que sigue fallando NO debe quedar mudo,
+ *  porque el usuario seguiría viendo "guardado con éxito" local sin saber que no se sincronizó). */
+const REPEAT_SAME_ERROR_MS = 15_000;
 
 /* ── Gate de sesión ──────────────────────────────────────────────────────────
  * Con reglas de producción, un listener abierto sin sesión (o sin permiso) no
@@ -76,8 +110,10 @@ export function setFirestoreSyncGate(open: boolean): void {
 
 function reportError(message: string): void {
   if (typeof window === 'undefined') return;
-  if (message === lastReportedError) return; // no repetir el mismo aviso
+  const now = Date.now();
+  if (message === lastReportedError && now - lastReportedErrorAt < REPEAT_SAME_ERROR_MS) return;
   lastReportedError = message;
+  lastReportedErrorAt = now;
   try {
     window.dispatchEvent(new CustomEvent(FIRESTORE_ERROR_EVENT, { detail: { message } }));
   } catch {
@@ -108,6 +144,7 @@ export function getIntranetDb(): Firestore | null {
   if (db) return db;
   try {
     if (getApps().length === 0) return null;
+    ensureAppCheck();
     db = getFirestore(getApp());
     return db;
   } catch (e) {
@@ -132,6 +169,7 @@ export async function ensureFirestoreReady(): Promise<Firestore | null> {
     if (getApps().length === 0) {
       initializeApp(getEffectiveFirebaseConfig().config);
     }
+    ensureAppCheck();
     db = getFirestore(getApp());
     return db;
   } catch (e) {
@@ -170,6 +208,29 @@ interface CollectionTracker {
  * Se limpia al primer push exitoso.
  */
 const failedPushes = new Map<string, number>();
+
+/** Reintentos programados de pushes que fallaron (por clave). */
+const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Espera antes del reintento automático (cubre reglas recién publicadas / red inestable). */
+const PUSH_RETRY_DELAY_MS = 90_000;
+
+/** Programa un reintento del push fallido (uno solo pendiente por clave). */
+function schedulePushRetry(key: string, op: () => Promise<unknown>): void {
+  if (retryTimers.has(key)) return;
+  const timer = setTimeout(() => {
+    retryTimers.delete(key);
+    void op();
+  }, PUSH_RETRY_DELAY_MS);
+  retryTimers.set(key, timer);
+}
+
+function cancelPushRetry(key: string): void {
+  const timer = retryTimers.get(key);
+  if (timer) {
+    clearTimeout(timer);
+    retryTimers.delete(key);
+  }
+}
 
 export function hasActivePushFailure(key: string): boolean {
   return failedPushes.has(key);
@@ -261,12 +322,14 @@ export async function pushCollectionDiff(
   } catch (e) {
     ok = false;
     markPushFailure(name);
+    schedulePushRetry(name, () => pushCollectionDiff(name, items, idOf));
     reportSyncError(e, name, 'escritura');
   }
 
   if (ok) {
     tracker.known = serialized;
     clearPushFailure(name);
+    cancelPushRetry(name);
     reportReady();
   }
   return ok;
@@ -313,6 +376,79 @@ export async function replaceCollection(
     reportSyncError(e, name, 'escritura');
   }
   getTracker(name).known = new Map(items.map((i) => [idOf(i), JSON.stringify(i)]));
+}
+
+/**
+ * Reconciliación de recuperación: sube SOLO los registros que están localmente y
+ * NO existen en la base remota (conocidos por snapshot). Jamás borra nada remoto:
+ * recupera escrituras que fallaron antes de publicar reglas / por red, sin pisar
+ * datos creados por otros dispositivos.
+ */
+export async function pushMissingOnly(
+  name: string,
+  items: Record<string, unknown>[],
+  idOf: (item: Record<string, unknown>) => string
+): Promise<void> {
+  const database = getIntranetDb();
+  if (!database) return;
+  const tracker = getTracker(name);
+  const missing = items.filter((i) => {
+    const id = idOf(i);
+    if (!id || tracker.known.has(id)) return false;
+    return docBytes(id, i) <= MAX_DOC_BYTES;
+  });
+  if (missing.length === 0) return;
+  try {
+    const batch = writeBatch(database);
+    let ops = 0;
+    for (const item of missing) {
+      if (ops >= BATCH_MAX_OPS) {
+        await batch.commit();
+        ops = 0;
+      }
+      batch.set(doc(database, name, idOf(item)), item);
+      ops++;
+    }
+    if (ops > 0) await batch.commit();
+    // Marcar como conocidos SOLO tras el commit: si falla, el reintento re-computa
+    // los faltantes contra un tracker intacto y los recupera de verdad.
+    for (const item of missing) {
+      const id = idOf(item);
+      if (!tracker.known.has(id)) tracker.known.set(id, JSON.stringify(item));
+    }
+    clearPushFailure(name);
+    reportReady();
+  } catch (e) {
+    markPushFailure(name);
+    schedulePushRetry(name, () => pushMissingOnly(name, items, idOf));
+    reportSyncError(e, name, 'escritura');
+  }
+}
+
+/**
+ * Igual que `pushMissingOnly`, para documentos individuales: crea el doc remoto SÓLO
+ * si no existe (no pisa el valor actual). Usado por la reconciliación de settings/meta.
+ */
+export async function pushSingleDocIfMissing(
+  col: string,
+  docId: string,
+  value: unknown
+): Promise<void> {
+  const database = getIntranetDb();
+  if (!database) return;
+  const docRef = doc(database, col, docId);
+  try {
+    const snap = await getDoc(docRef);
+    if (snap.exists()) return;
+    await setDoc(docRef, value as Record<string, unknown>);
+    clearPushFailure(`${col}/${docId}`);
+    cancelPushRetry(`${col}/${docId}`);
+    reportReady();
+  } catch (e) {
+    markPushFailure(`${col}/${docId}`);
+    schedulePushRetry(`${col}/${docId}`, () => pushSingleDocIfMissing(col, docId, value));
+    reportSyncError(e, col, 'escritura');
+  }
 }
 
 /**
@@ -368,9 +504,11 @@ export async function pushSingleDoc(col: string, docId: string, value: unknown):
   try {
     await setDoc(doc(database, col, docId), value as Record<string, unknown>);
     clearPushFailure(key);
+    cancelPushRetry(key);
     reportReady();
   } catch (e) {
     markPushFailure(key);
+    schedulePushRetry(key, () => pushSingleDoc(col, docId, value));
     reportSyncError(e, col, 'escritura');
   }
 }
@@ -414,4 +552,78 @@ function reportSyncError(e: unknown, context: string, operation: 'lectura' | 'es
     console.error(`No se pudo sincronizar "${context}" con Firestore:`, e);
     reportError('No se pudo sincronizar con la base de datos compartida. Se reintenta con cada cambio.');
   }
+}
+
+
+/* ────────────── Auto-diagnóstico de acceso (corre 1 vez/sesión, al loguear admin) ────────── */
+
+/**
+ * Comprueba TODA la cadena de una vez y entrega UNA conclusión puntual:
+ *   app → proyecto correcto → reglas publicadas → identidad admin reconocida.
+ * Distincción clave: si la lectura de authorized_users falla, el problema NO es la
+ * cuenta (cualquier sesión puede leer esa colección): es reglas/otra base/otro proyecto.
+ */
+export async function runAccessDiagnostics(email: string): Promise<void> {
+  const database = await ensureFirestoreReady();
+  if (!database || typeof window === 'undefined') return;
+  const cleanEmail = (email || '').toLowerCase().trim();
+  const lines: string[] = [];
+  const { getEffectiveFirebaseConfig, getFirebaseIdToken, getFirebaseAuthEmail } = await import('./auth');
+  const googleEmail = (getFirebaseAuthEmail() || '').toLowerCase().trim();
+  // Contexto completo: identidad de la UI vs identidad REAL de Google en Firebase.
+  lines.push(
+    `Perfil en la interfaz: ${cleanEmail || 'sin email'} · Sesión de Google real: ${
+      googleEmail || 'NINGUNA (no hay login de Google activo)'
+    } · Proyecto de la app: ${getEffectiveFirebaseConfig().config.projectId} · base: (predeterminada)`
+  );
+
+  // Tipo de sesión: Firestore exige request.auth de Google; el ingreso institucional
+  // (solo email) no genera ID token y SIEMPRE quedará bloqueado por reglas.
+  const idToken = await getFirebaseIdToken();
+  if (!idToken) {
+    lines.push(
+      '→ La sesión de Google real está VACÍA: ingresaste escribiendo el email (institucional) y Firestore bloquea SIEMPRE esas sesiones. Usá "Continuar con Google".'
+    );
+  } else if (googleEmail && cleanEmail && googleEmail !== cleanEmail) {
+    lines.push(
+      `→ ATENCIÓN: la sesión de Google (${googleEmail}) es OTRA cuenta distinta a la mostrada en la interfaz (${cleanEmail}).`
+    );
+  }
+  try {
+    await getDoc(doc(database, 'authorized_users', cleanEmail || '__x__'));
+    lines.push('→ Lectura de authorized_users OK: las reglas SI son visibles desde esta app/base.');
+    try {
+      await setDoc(doc(database, 'meta', 'health_check'), {
+        at: new Date().toISOString(),
+        by: cleanEmail,
+      });
+      lines.push('→ Escritura OK: tu cuenta está reconocida como admin. Todo el sistema sincroniza bien.');
+    } catch (writeErr) {
+      const code = (writeErr as { code?: string })?.code ?? '';
+      if (code === 'permission-denied') {
+        lines.push('→ Escritura DENEGADA pero lectura OK: las reglas confirman que tu email NO es admin maestro.');
+        lines.push('   → Verificá con qué Gmail entraste (o pedí la aprobación/rol). Email del token: ' + cleanEmail);
+      } else {
+        lines.push(`→ Escritura falló (${code}).`);
+      }
+    }
+  } catch (readErr) {
+    const code = (readErr as { code?: string })?.code ?? '';
+    if (code === 'permission-denied') {
+      lines.push(
+        '→ La app NO puede leer authorized_users: para ESTA app las reglas siguen en bloqueo total. Causas: (a) pegaste las reglas en otra BASE del selector (usá la "(predeterminada)"), (b) pegaste en otro PROYECTO (la app usa: ' +
+          getEffectiveFirebaseConfig().config.projectId +
+          '), o (c) el botón Publicar no se concretó.'
+      );
+    } else {
+      lines.push(`→ Lectura falló (${code}).`);
+    }
+  }
+  lastReportedError = '';
+  try {
+    window.dispatchEvent(new CustomEvent(FIRESTORE_DIAGNOSIS_EVENT, { detail: { lines } }));
+  } catch {
+    // Ignore
+  }
+  console.info('[Firebase · diagnóstico]', lines.join(' | '));
 }

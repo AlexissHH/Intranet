@@ -23,6 +23,7 @@ import {
   type CalendarEventPayload,
 } from '@/lib/workspace';
 import {
+  FIRESTORE_DIAGNOSIS_EVENT,
   FIRESTORE_ERROR_EVENT,
   FIRESTORE_READY_EVENT,
 } from '@/lib/firestore';
@@ -214,7 +215,9 @@ export default function IntranetApp() {
       let hint = '';
       if (base.includes('bloqueó')) {
         const email = user?.email?.toLowerCase() ?? '';
-        if (!email) {
+        if (user?.provider === 'institucional') {
+          hint = ' Ingresaste SIN Google (modo institucional): Firestore exige sesión de Google; usá "Continuar con Google".';
+        } else if (!email) {
           hint = ' Además: no hay sesión iniciada con Google.';
         } else {
           const record = getAuthorizedUsers().find((u) => u.email.toLowerCase() === email);
@@ -231,11 +234,20 @@ export default function IntranetApp() {
     const handleFirestoreReady = () => {
       showToast('success', 'Sincronización con la base de datos compartida de Firebase activa.');
     };
+    // Auto-diagnóstico que corre al loguear un admin: una sola conclusión puntual.
+    const handleFirestoreDiagnosis = (e: Event) => {
+      const lines = (e as CustomEvent<{ lines?: string[] }>).detail?.lines ?? [];
+      const text = lines.join(' ').slice(0, 380);
+      if (!text) return;
+      showToast(text.includes('Escritura OK') ? 'success' : 'error', text);
+    };
     window.addEventListener(FIRESTORE_ERROR_EVENT, handleFirestoreError);
     window.addEventListener(FIRESTORE_READY_EVENT, handleFirestoreReady);
+    window.addEventListener(FIRESTORE_DIAGNOSIS_EVENT, handleFirestoreDiagnosis);
     return () => {
       window.removeEventListener(FIRESTORE_ERROR_EVENT, handleFirestoreError);
       window.removeEventListener(FIRESTORE_READY_EVENT, handleFirestoreReady);
+      window.removeEventListener(FIRESTORE_DIAGNOSIS_EVENT, handleFirestoreDiagnosis);
     };
   }, [showToast, user]);
 

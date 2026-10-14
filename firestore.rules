@@ -23,7 +23,7 @@ service cloud.firestore {
     }
 
     function currentEmail() {
-      return request.auth.token.email.toLower();
+      return request.auth.token.email.lower();
     }
 
     // Admins maestros institucionales. DEBE coincidir con DEFAULT_MASTER_ADMIN_EMAILS
@@ -196,7 +196,9 @@ service cloud.firestore {
       // Lectura (resumen promedio en la ficha): solo usuarios aprobados o admins.
       allow read: if isApprovedUser();
 
-      // Creación pública (sin login), una sola vez por token:
+      // Creación pública (sin login), una sola vez por token. El token DEBE coincidir
+      // con el que el admin guardó en la actividad real (anti-spam: sin este ancla,
+      // cualquiera podría sembrar respuestas falsas con tokens inventados).
       allow create: if token.matches('^csat-[a-z0-9-]{16,90}$')
         && !exists(/databases/$(database)/documents/visit_csat/$(token))
         && request.resource.data.keys().hasOnly(['activityId', 'rating', 'comment', 'submittedAt'])
@@ -209,7 +211,9 @@ service cloud.firestore {
         && request.resource.data.comment is string
         && request.resource.data.comment.size() <= 500
         && request.resource.data.submittedAt is string
-        && request.resource.data.submittedAt.size() <= 40;
+        && request.resource.data.submittedAt.size() <= 40
+        && exists(/databases/$(database)/documents/activities/$(request.resource.data.activityId))
+        && get(/databases/$(database)/documents/activities/$(request.resource.data.activityId)).data.csatSurveyToken == token;
 
       // Nadie puede modificar ni borrar respuestas ya enviadas (integridad del dato).
       allow update, delete: if false;

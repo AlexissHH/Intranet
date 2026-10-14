@@ -36,7 +36,7 @@ import {
   type VisitCsatDoc,
 } from '@/lib/visit-csat';
 import { subscribeToCollection, VISIT_CSAT_COLLECTION } from '@/lib/firestore';
-import { getLocalDateString, getInstitutionalTodayParts, isWeekendDay, getWeekendDayName } from '@/lib/utils';
+import { getLocalDateString, getInstitutionalTodayParts, isWeekendDay, getWeekendDayName, INSTITUTIONAL_TIMEZONE } from '@/lib/utils';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
 import {
@@ -106,6 +106,37 @@ function getStatusChip(status?: string): { label: string; cls: string } {
   };
 }
 
+/** Ahora mismo en la zona institucional: fecha YYYY-MM-DD y hora HH:mm (comparables como texto). */
+function getInstitutionalNowStamp(): { ymd: string; hhmm: string } {
+  const hhmm = new Intl.DateTimeFormat('es-AR', {
+    timeZone: INSTITUTIONAL_TIMEZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date());
+  return { ymd: getLocalDateString(), hhmm };
+}
+
+/**
+ * Estado ELEMENTAL para mostrar: los estados gestionados a mano (pendiente/cancelada/
+ * finalizada/en_curso) mandan; si la actividad está "confirmada", el chip se DERIVA de
+ * los horarios reales: en curso dentro del rango, finalizada al pasar la hora de fin
+ * (o el día anterior entero). Es solo visual: no cambia el estado persistido.
+ */
+function getEffectiveStatus(act: ActivityItem): string {
+  const base = act.status || '';
+  if (base !== 'confirmada') return base;
+  const start = act.startTime || '';
+  const end = act.endTime || '';
+  const { ymd, hhmm } = getInstitutionalNowStamp();
+  if (act.date && act.date < ymd) return 'finalizada';
+  if (act.date === ymd && start && end) {
+    if (hhmm >= start && hhmm < end) return 'en_curso';
+    if (hhmm >= end) return 'finalizada';
+  }
+  return base;
+}
+
 const DAY_NAMES_FULL = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const MONTH_NAMES_FULL = [
   'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
@@ -138,6 +169,10 @@ export function AgendaSection({
   const [selectedActivity, setSelectedActivity] = useState<ActivityItem | null>(null);
   const [csatEmailInput, setCsatEmailInput] = useState('');
   const [csurveyEmailError, setCsurveyEmailError] = useState<string | null>(null);
+  /** Prompt CSAT: visita de HOY que terminó (hora de fin pasada, estado confirmada)
+   *  con email de contacto cargado y sin encuesta enviada todavía. */
+  const [csatAutoPrompt, setCsatAutoPrompt] = useState<ActivityItem | null>(null);
+  const dismissedCsatIdsRef = useRef<Set<string>>(new Set());
   const [selectedDayActivities, setSelectedDayActivities] = useState<{
     dayName: string;
     dayNumber: number;
@@ -165,6 +200,33 @@ export function AgendaSection({
     setIsCancellingInModal(false);
     setCancelReasonInput('');
   }, [selectedActivity?.id, selectedActivity?.contactEmail]);
+
+  // Detecciónautomática del fin de visita: cuando pasa la hora de fin y la encuesta
+  // no fue enviada, propone enviarla con UN clic (semi-automático con confirmación:
+  // un envío 100% desatendido no es seguro sin backend con credenciales de Gmail).
+  React.useEffect(() => {
+    if (!isAdmin || !hasWorkspaceAuth || !onOpenEmailModal || !onUpdateActivityFull) return;
+    const evaluate = () => {
+      const { ymd, hhmm } = getInstitutionalNowStamp();
+      const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      const candidate = activities.find(
+        (a) =>
+          a.type === 'visita' &&
+          a.status === 'confirmada' &&
+          a.date === ymd &&
+          Boolean(a.endTime) &&
+          hhmm >= (a.endTime || '') &&
+          Boolean(a.contactEmail) &&
+          EMAIL_RE.test((a.contactEmail || '').trim()) &&
+          !a.csatSurveyToken &&
+          !dismissedCsatIdsRef.current.has(a.id)
+      );
+      setCsatAutoPrompt(candidate || null);
+    };
+    evaluate();
+    const timer = setInterval(evaluate, 60_000);
+    return () => clearInterval(timer);
+  }, [activities, isAdmin, hasWorkspaceAuth, onOpenEmailModal, onUpdateActivityFull]);
 
   const dayContentRef = useRef<HTMLDivElement>(null);
   const activityContentRef = useRef<HTMLDivElement>(null);
@@ -199,6 +261,52 @@ export function AgendaSection({
     setActiveView('dia');
     scrollToCalendarTop('smooth');
   }, [scrollToCalendarTop]);
+
+  /**
+   * Flujo común de la encuesta CSAT (perfil admin y prompt auto): garantiza token +
+   * email de contacto, persiste el envío y abre el composer de Gmail pre-armado.
+   */
+  const openCsatEmailFor = useCallback((activityInput: ActivityItem) => {
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const cleanEmail = (activityInput.contactEmail || '').trim().toLowerCase();
+    if (!cleanEmail || !EMAIL_RE.test(cleanEmail)) {
+      setCsurveyEmailError('Ingresá un email válido de la institución para enviar la encuesta.');
+      return false;
+    }
+    setCsurveyEmailError(null);
+    const token = activityInput.csatSurveyToken || createCsatToken();
+    // Persiste token + email de contacto (el email queda para el próximo reenvío).
+    const withData: ActivityItem = {
+      ...activityInput,
+      csatSurveyToken: token,
+      csatSurveySentAt: new Date().toISOString(),
+      contactEmail: cleanEmail,
+    };
+    onUpdateActivityFull?.(withData);
+    setSelectedActivity(withData);
+    const surveyUrl = buildCsatSurveyUrl({
+      token,
+      activityId: activityInput.id,
+      title: activityInput.title,
+      date: activityInput.date,
+      origin: window.location.origin,
+    });
+    const subject = `Encuesta de satisfacción — ${activityInput.title}`;
+    const body = [
+      `Estimados integrantes de ${activityInput.institution || 'la institución educativa'}:`,
+      '',
+      `Gracias por haber participado de la actividad "${activityInput.title}" del día ${activityInput.date}.`,
+      '',
+      'Para acompañar la mejora continua de las visitas, les pedimos completar esta encuesta breve (toma menos de 1 minuto):',
+      surveyUrl,
+      '',
+      'Su opinión nos permite seguir fortaleciendo el programa cívico del Instituto.',
+      'Muchas gracias.',
+      'Instituto de Capacitación Legislativa',
+    ].join('\n');
+    onOpenEmailModal?.(cleanEmail, subject, body);
+    return true;
+  }, [onOpenEmailModal, onUpdateActivityFull]);
 
   const totalVisitas = activities.filter((a) => a.type === 'visita').length;
   const totalCapacitaciones = activities.filter((a) => a.type === 'capacitacion').length;
@@ -1126,8 +1234,8 @@ export function AgendaSection({
                                       ? 'Sesión / Acto'
                                       : 'Reunión'}
                                   </span>
-                                  <span className={`text-[10px] px-2 py-0.5 rounded font-bold border ${getStatusChip(act.status).cls}`}>
-                                    {getStatusChip(act.status).label}
+                                  <span className={`text-[10px] px-2 py-0.5 rounded font-bold border ${getStatusChip(getEffectiveStatus(act)).cls}`}>
+                                    {getStatusChip(getEffectiveStatus(act)).label}
                                   </span>
                                 </div>
 
@@ -1962,8 +2070,8 @@ export function AgendaSection({
                             ? `MAÑANA • ${cap.startTime || '15:00'} HS`
                             : `${dayName} ${dayNum} ${monthShort.toUpperCase()} • ${cap.startTime || '15:00'} HS`}
                         </span>
-                        <span className={`px-1.5 py-0.5 rounded border ${getStatusChip(cap.status).cls} font-bold`}>
-                          {getStatusChip(cap.status).label}
+                        <span className={`px-1.5 py-0.5 rounded border ${getStatusChip(getEffectiveStatus(cap)).cls} font-bold`}>
+                          {getStatusChip(getEffectiveStatus(cap)).label}
                         </span>
                       </div>
                       <div
@@ -2289,8 +2397,8 @@ export function AgendaSection({
                               ? 'Sesión / Acto'
                               : 'Reunión'}
                           </span>
-                                  <span className={`text-[10px] px-2 py-0.5 rounded font-bold border ${getStatusChip(act.status).cls}`}>
-                                    {getStatusChip(act.status).label}
+                                  <span className={`text-[10px] px-2 py-0.5 rounded font-bold border ${getStatusChip(getEffectiveStatus(act)).cls}`}>
+                                    {getStatusChip(getEffectiveStatus(act)).label}
                                   </span>
                                 </div>
 
@@ -2453,27 +2561,31 @@ export function AgendaSection({
                     ? 'Sesión / Acto'
                     : 'Reunión'}
                 </span>
-                {selectedActivity.status === 'pendiente' ? (
-                  <span className="text-[10px] text-amber-900 bg-amber-100 px-2 py-0.5 rounded font-extrabold border border-amber-300 uppercase tracking-wide">
-                    Pendiente de Confirmación
-                  </span>
-                ) : selectedActivity.status === 'cancelada' ? (
-                  <span className="text-[10px] text-rose-900 bg-rose-100 px-2 py-0.5 rounded font-extrabold border border-rose-300 uppercase tracking-wide">
-                    Visita Cancelada
-                  </span>
-                ) : selectedActivity.status === 'en_curso' ? (
-                  <span className="text-[10px] text-blue-900 bg-blue-100 px-2 py-0.5 rounded font-extrabold border border-blue-300 uppercase tracking-wide">
-                    En Curso
-                  </span>
-                ) : selectedActivity.status === 'finalizada' ? (
-                  <span className="text-[10px] text-slate-800 bg-slate-100 px-2 py-0.5 rounded font-extrabold border border-slate-300 uppercase tracking-wide">
-                    Finalizada
-                  </span>
-                ) : (
-                  <span className="text-[10px] text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded font-extrabold border border-emerald-300 uppercase tracking-wide">
-                    Confirmada
-                  </span>
-                )}
+                {(() => {
+                  // Ficha con estado DERIVADO de horarios reales (visual, no persistido).
+                  const effectiveStatus = getEffectiveStatus(selectedActivity);
+                  return effectiveStatus === 'pendiente' ? (
+                    <span className="text-[10px] text-amber-900 bg-amber-100 px-2 py-0.5 rounded font-extrabold border border-amber-300 uppercase tracking-wide">
+                      Pendiente de Confirmación
+                    </span>
+                  ) : effectiveStatus === 'cancelada' ? (
+                    <span className="text-[10px] text-rose-900 bg-rose-100 px-2 py-0.5 rounded font-extrabold border border-rose-300 uppercase tracking-wide">
+                      Visita Cancelada
+                    </span>
+                  ) : effectiveStatus === 'en_curso' ? (
+                    <span className="text-[10px] text-blue-900 bg-blue-100 px-2 py-0.5 rounded font-extrabold border border-blue-300 uppercase tracking-wide">
+                      En Curso
+                    </span>
+                  ) : effectiveStatus === 'finalizada' ? (
+                    <span className="text-[10px] text-slate-800 bg-slate-100 px-2 py-0.5 rounded font-extrabold border border-slate-300 uppercase tracking-wide">
+                      Finalizada
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded font-extrabold border border-emerald-300 uppercase tracking-wide">
+                      Confirmada
+                    </span>
+                  );
+                })()}
                 <span className="text-[10px] text-slate-500 font-mono">
                   Fecha: {selectedActivity.date}
                 </span>
@@ -2608,38 +2720,7 @@ export function AgendaSection({
                           setCsurveyEmailError('Ingresá un email válido de la institución para enviar la encuesta.');
                           return;
                         }
-                        const activity = selectedActivity;
-                        const token = activity.csatSurveyToken || createCsatToken();
-                        // Persiste token + email de contacto (el email queda para el próximo reenvío).
-                        const withData: ActivityItem = {
-                          ...activity,
-                          csatSurveyToken: token,
-                          csatSurveySentAt: new Date().toISOString(),
-                          contactEmail: cleanEmail,
-                        };
-                        onUpdateActivityFull(withData);
-                        setSelectedActivity(withData);
-                        const surveyUrl = buildCsatSurveyUrl({
-                          token,
-                          activityId: activity.id,
-                          title: activity.title,
-                          date: activity.date,
-                          origin: window.location.origin,
-                        });
-                        const subject = `Encuesta de satisfacción — ${activity.title}`;
-                        const body = [
-                          `Estimados integrantes de ${activity.institution || 'la institución educativa'}:`,
-                          '',
-                          `Gracias por haber participado de la actividad "${activity.title}" del día ${activity.date}.`,
-                          '',
-                          'Para acompañar la mejora continua de las visitas, les pedimos completar esta encuesta breve (toma menos de 1 minuto):',
-                          surveyUrl,
-                          '',
-                          'Su opinión nos permite seguir fortaleciendo el programa cívico del Instituto.',
-                          'Muchas gracias.',
-                          'Instituto de Capacitación Legislativa',
-                        ].join('\n');
-                        onOpenEmailModal(cleanEmail, subject, body);
+                        openCsatEmailFor({ ...selectedActivity, contactEmail: cleanEmail });
                       }}
                       className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-[#001428] hover:bg-[#0e4a7b] text-white font-bold text-[11px] transition-colors cursor-pointer"
                     >
@@ -2747,6 +2828,49 @@ export function AgendaSection({
           </div>
         </div>
       )}
+
+      {csatAutoPrompt && (
+        <div className="fixed bottom-28 sm:bottom-6 inset-x-4 sm:inset-x-auto sm:right-6 z-40 max-w-sm bg-white border-2 border-[#0284c7] rounded-xl shadow-2xl p-4 space-y-2.5 animate-in fade-in">
+          <div className="flex items-start gap-2">
+            <Mail className="w-4 h-4 text-[#0284c7] mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-[#001428] leading-snug">
+                La visita &ldquo;{csatAutoPrompt.title}&rdquo; finalizó ({csatAutoPrompt.endTime} hs).
+              </p>
+              <p className="text-[11px] text-slate-600 mt-1 break-words">
+                ¿Enviamos la encuesta de satisfacción a <strong>{csatAutoPrompt.contactEmail}</strong>?
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                dismissedCsatIdsRef.current.add(csatAutoPrompt.id);
+                setCsatAutoPrompt(null);
+              }}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 font-semibold text-[11px] hover:bg-slate-100 transition-colors cursor-pointer"
+            >
+              No ahora
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (openCsatEmailFor(csatAutoPrompt)) {
+                  setCsatAutoPrompt(null);
+                }
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#001428] hover:bg-[#0e4a7b] text-white font-bold text-[11px] transition-colors cursor-pointer"
+            >
+              <Mail className="w-3.5 h-3.5 text-sky-300" />
+              <span>Enviar encuesta</span>
+            </button>
+          </div>
+          <p className="text-[10px] text-slate-400">
+            Cada envío usa un link único: la institución puede responder una sola vez.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -2813,3 +2937,4 @@ function VisitCsatResponses({ activityId }: { activityId: string }) {
     </div>
   );
 }
+

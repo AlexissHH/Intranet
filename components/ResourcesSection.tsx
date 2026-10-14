@@ -305,6 +305,15 @@ export function ResourcesSection({
     e.preventDefault();
     if (!newTitle.trim()) return;
 
+    // Esquema forzado: lo que no venga con http(s) recibe https:// (un `javascript:` o
+    // cualquier esquema raro nunca llega a un href de navegador).
+    const driveRaw = newDriveUrl.trim();
+    const driveUrl = driveRaw
+      ? /^https?:\/\//i.test(driveRaw)
+        ? driveRaw
+        : `https://${driveRaw}`
+      : undefined;
+
     const newDoc: ResourceDocument = {
       id: 'res-' + Date.now(),
       title: newTitle.trim(),
@@ -312,7 +321,7 @@ export function ResourcesSection({
       format: newFormat,
       description: newDesc.trim() || 'Modelo oficial cargado por administración.',
       updatedAt: 'Hoy',
-      driveUrl: newDriveUrl.trim() || undefined,
+      driveUrl,
       contentTemplate: newTemplate.trim() || undefined,
     };
 
