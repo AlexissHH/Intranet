@@ -31,8 +31,10 @@ import {
   getActivities,
   initSharedBackend,
   saveActivity,
+  deleteActivity,
   getNews,
   saveNews,
+  deleteNews,
   setAnnouncementNewsId,
   getCourses,
   saveCourse,
@@ -617,6 +619,26 @@ export default function IntranetApp() {
     setActivities(updated);
   };
 
+  /** Elimina DEFINITIVAMENTE una actividad/visita del cronograma (y de Firestore). */
+  const handleDeleteActivity = (id: string) => {
+    if (!checkAdminPermission('eliminar visitas del cronograma')) return;
+    // Regla del sistema: solo se eliminan visitas ya canceladas (el historial
+    // confirmado/pendiente se conserva; la cancelación es el paso previo obligatorio).
+    const target = getActivities().find((a) => a.id === id);
+    if (!target) {
+      showToast('error', 'La visita ya no existe en el cronograma.');
+      return;
+    }
+    if (target.status !== 'cancelada') {
+      showToast('error', 'Solo se pueden eliminar visitas CANCELADAS. Cancelala primero si corresponde.');
+      return;
+    }
+    const updated = deleteActivity(id);
+    setActivities(updated);
+    // Si la ficha de la actividad eliminada está abierta, se cierra sola al desaparecer.
+    showToast('success', 'La visita fue eliminada definitivamente del cronograma.');
+  };
+
   const handleSaveNews = (newNews: NewsItem) => {
     if (!checkAdminPermission('publicar novedades oficiales')) return;
     const updated = saveNews(newNews);
@@ -657,6 +679,14 @@ export default function IntranetApp() {
     const updated = deleteResource(id);
     setResources(updated);
     showToast('success', 'Recurso eliminado del repositorio.');
+  };
+
+  /** Elimina un comunicado/novedad del sistema (y de Firestore). */
+  const handleDeleteNews = (id: string) => {
+    if (!checkAdminPermission('eliminar novedades oficiales')) return;
+    const updated = deleteNews(id);
+    setNews(updated);
+    showToast('success', 'El comunicado fue eliminado definitivamente.');
   };
 
   const handleSaveLink = (newLink: QuickLink) => {
@@ -870,6 +900,8 @@ export default function IntranetApp() {
               team={team}
               onNavigateTab={setActiveTab}
               onNavigateToAgendaDate={handleNavigateToAgendaDate}
+              onSaveNews={handleSaveNews}
+              onDeleteNews={handleDeleteNews}
               onOpenQuickAction={(action) => {
                 if (
                   checkAdminPermission(
@@ -960,6 +992,7 @@ export default function IntranetApp() {
               isAdmin={user?.role === 'administrador'}
               onUpdateActivityStatus={handleUpdateActivityStatus}
               onUpdateActivityFull={handleUpdateActivityFull}
+              onDeleteActivity={handleDeleteActivity}
               onOpenEmailModal={handleOpenEmailTo}
               onOpenNewActivityModal={(targetDate?: string) => {
                 if (checkAdminPermission('crear nuevas actividades en el cronograma')) {
@@ -1062,6 +1095,7 @@ export default function IntranetApp() {
               }}
               onOpenUserManagement={() => setIsUserManagementOpen(true)}
               onOpenBackupModal={() => setIsBackupModalOpen(true)}
+              onDeleteActivity={handleDeleteActivity}
               onNavigateTab={setActiveTab}
               hasWorkspaceToken={!!accessToken}
               onUpdateActivityStatus={handleUpdateActivityStatus}

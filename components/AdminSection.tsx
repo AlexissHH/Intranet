@@ -115,6 +115,8 @@ interface AdminSectionProps {
   hasWorkspaceToken: boolean;
   onUpdateActivityStatus?: (id: string, status: ActivityItem['status'], reason?: string) => void;
   onSyncEventToCalendar?: (activity: ActivityItem) => void;
+  /** Elimina DEFINITIVAMENTE una visita cancelada del cronograma (y de Firestore). */
+  onDeleteActivity?: (id: string) => void;
   onSettingsUpdated?: (settings: InstitutionalSettings) => void;
   onSetAnnouncementNewsId?: (id: string | null) => void;
   initialTab?: 'visitas' | 'objetivos' | 'auditoria_cursos' | 'cards_instituto' | 'institucional' | 'usuarios' | 'contenidos' | 'mantenimiento';
@@ -294,6 +296,7 @@ export function AdminSection({
   hasWorkspaceToken,
   onUpdateActivityStatus,
   onSyncEventToCalendar,
+  onDeleteActivity,
   onSettingsUpdated,
   onSetAnnouncementNewsId,
   initialTab,
@@ -331,6 +334,8 @@ export function AdminSection({
   const [visitSearch, setVisitSearch] = useState('');
   const [cancellingVisit, setCancellingVisit] = useState<ActivityItem | null>(null);
   const [cancellationReasonInput, setCancellationReasonInput] = useState('');
+  /** Visita cancelada pendiente de eliminación definitiva (confirmación previa). */
+  const [visitToDelete, setVisitToDelete] = useState<ActivityItem | null>(null);
 
   // Course Audits & Anti-Fraud Checklist state
   const [courseAudits, setCourseAudits] = useState<AgentCourseAudit[]>(() => getCourseAudits());
@@ -1074,6 +1079,18 @@ export function AdminSection({
                               >
                                 <RefreshCw className="w-3.5 h-3.5" />
                                 <span>Reabrir</span>
+                              </button>
+                            )}
+
+                            {isCancelada && onDeleteActivity && (
+                              <button
+                                type="button"
+                                onClick={() => setVisitToDelete(visit)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 text-xs font-semibold transition-colors cursor-pointer"
+                                title="Eliminar definitivamente del cronograma"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>Eliminar</span>
                               </button>
                             )}
 
@@ -2804,6 +2821,31 @@ export function AdminSection({
         isDestructive={false}
         onConfirm={handleConfirmResetSettings}
         onCancel={() => setIsResetSettingsConfirmOpen(false)}
+      />
+
+      {/* Modal de confirmación para eliminar visita cancelada definitivamente */}
+      <ConfirmationModal
+        isOpen={Boolean(visitToDelete)}
+        title="Eliminar Visita del Cronograma"
+        description={`¿Estás seguro de que deseas eliminar DEFINITIVAMENTE la visita "${visitToDelete?.title || ''}"? La visita estaba cancelada y desaparecerá del cronograma para todos los integrantes. Esta acción no se puede deshacer.`}
+        confirmLabel="Eliminar para siempre"
+        cancelLabel="Volver"
+        isDestructive={true}
+        itemDetails={visitToDelete ? [
+          { label: 'Visita', value: visitToDelete.title },
+          { label: 'Fecha', value: `${visitToDelete.date} • ${visitToDelete.startTime} a ${visitToDelete.endTime} hs` },
+          { label: 'Institución', value: visitToDelete.institution || 'Sin institución cargada' },
+          { label: 'Estado actual', value: 'Cancelada' },
+        ] : []}
+        onConfirm={() => {
+          if (visitToDelete && onDeleteActivity) {
+            onDeleteActivity(visitToDelete.id);
+            setSuccessMessage(`La visita "${visitToDelete.title}" fue eliminada definitivamente del cronograma.`);
+            setTimeout(() => setSuccessMessage(null), 4000);
+          }
+          setVisitToDelete(null);
+        }}
+        onCancel={() => setVisitToDelete(null)}
       />
     </div>
   );

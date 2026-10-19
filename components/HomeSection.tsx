@@ -30,9 +30,12 @@ import {
   CheckCircle2,
   Mail,
   Globe,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import { ActivityItem, NewsItem, QuickLink, TeamMember, TrainingCourse, AgentCourseAudit } from '@/lib/mock-data';
 import { getLocalDateString, formatDateDisplay, getBirthdayCountdown, getShortWeekdayEs, getInstitutionalTodayParts } from '@/lib/utils';
+import { ConfirmationModal } from '@/components/ConfirmationModal';
 
 /** Máximo de comunicados visibles en Inicio: 5 en la semana corriente; 6 si hay avisos con fecha posterior a la semana. */
 const NEWS_HOME_LIMIT_SAME_WEEK = 5;
@@ -72,6 +75,10 @@ interface HomeSectionProps {
   onNavigateToAgendaDate?: (dateStr: string, view?: 'dia' | 'semana' | 'mes' | 'lista') => void;
   onOpenQuickAction: (action: 'visita' | 'actividad' | 'novedad') => void;
   onSyncEventToCalendar: (activity: ActivityItem) => void;
+  /** Edita un comunicado existente (admin). */
+  onSaveNews?: (item: NewsItem) => void;
+  /** Elimina definitivamente un comunicado (admin). */
+  onDeleteNews?: (id: string) => void;
   hasCalendarAuth: boolean;
   isAdmin?: boolean;
 }
@@ -105,11 +112,17 @@ export function HomeSection({
   onNavigateToAgendaDate,
   onOpenQuickAction,
   onSyncEventToCalendar,
+  onSaveNews,
+  onDeleteNews,
   isAdmin = false,
 }: HomeSectionProps) {
   const [selectedNews, setSelectedNews] = useState<NewsItem | null>(null);
   const [instSettings, setInstSettings] = useState<InstitutionalSettings>(DEFAULT_SETTINGS);
   const [courseAuditsState, setCourseAuditsState] = useState<AgentCourseAudit[]>([]);
+
+  /** Edición de comunicado (admin): item en edición + campos del formulario. */
+  const [editingNews, setEditingNews] = useState<NewsItem | null>(null);
+  const [newsToDelete, setNewsToDelete] = useState<NewsItem | null>(null);
 
   React.useEffect(() => {
     setInstSettings(getInstitutionalSettings());
@@ -699,7 +712,7 @@ export function HomeSection({
                             </p>
                           </div>
 
-                          <div className="flex items-center gap-2 pt-2">
+                          <div className="flex items-center gap-2 pt-2 flex-wrap">
                             <button
                               onClick={() => setSelectedNews(item)}
                               className="px-3.5 py-1.5 bg-[#001428] hover:bg-[#0e4a7b] text-white text-xs font-semibold rounded shadow-2xs transition-colors cursor-pointer"
@@ -712,6 +725,14 @@ export function HomeSection({
                             >
                               Descargar Resolución
                             </button>
+                            {isAdmin && (onSaveNews || onDeleteNews) && (
+                              <div className="ml-auto flex items-center gap-1">
+                                <NewsAdminActions
+                                  onEdit={() => setEditingNews(item)}
+                                  onDelete={() => setNewsToDelete(item)}
+                                />
+                              </div>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -751,13 +772,21 @@ export function HomeSection({
                         </p>
                       </div>
                     </div>
-                    <button
-                      onClick={() => setSelectedNews(item)}
-                      className="text-slate-400 hover:text-slate-700 p-1.5 rounded-md hover:bg-slate-50 transition-colors cursor-pointer shrink-0"
-                      title="Leer noticia completa"
-                    >
-                      <Eye className="w-4 h-4" />
-                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => setSelectedNews(item)}
+                        className="text-slate-400 hover:text-slate-700 p-1.5 rounded-md hover:bg-slate-50 transition-colors cursor-pointer"
+                        title="Leer noticia completa"
+                      >
+                        <Eye className="w-4 h-4" />
+                      </button>
+                      {isAdmin && (onSaveNews || onDeleteNews) && (
+                        <NewsAdminActions
+                          onEdit={() => setEditingNews(item)}
+                          onDelete={() => setNewsToDelete(item)}
+                        />
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -1127,6 +1156,242 @@ export function HomeSection({
           </div>
         </div>
       )}
+
+      {/* Modal de edición de comunicado (admin) — key por id: se monta limpio por comunicado */}
+      {editingNews && (
+        <NewsEditModal
+          key={editingNews.id}
+          item={editingNews}
+          onClose={() => setEditingNews(null)}
+          onSave={(updated) => onSaveNews?.(updated)}
+        />
+      )}
+
+      {/* Confirmación de eliminación de comunicado (admin) */}
+      <ConfirmationModal
+        isOpen={Boolean(newsToDelete)}
+        title="Eliminar Comunicado"
+        description={`¿Estás seguro de que deseas eliminar definitivamente el comunicado "${newsToDelete?.title || ''}"? Desaparecerá para todos los integrantes y no se puede deshacer.`}
+        confirmLabel="Eliminar comunicado"
+        cancelLabel="Volver"
+        isDestructive={true}
+        itemDetails={newsToDelete ? [
+          { label: 'Título', value: newsToDelete.title },
+          { label: 'Fecha', value: newsToDelete.date },
+          { label: 'Categoría', value: newsToDelete.category },
+        ] : []}
+        onConfirm={() => {
+          if (newsToDelete) {
+            onDeleteNews?.(newsToDelete.id);
+            if (selectedNews?.id === newsToDelete.id) setSelectedNews(null);
+          }
+          setNewsToDelete(null);
+        }}
+        onCancel={() => setNewsToDelete(null)}
+      />
+    </div>
+  );
+}
+
+/**
+ * Modal de edición de comunicado (admin): mismos campos que el alta, conservando la
+ * fecha original de publicación (editar no refecha el aviso).
+ */
+function NewsEditModal({
+  item,
+  onClose,
+  onSave,
+}: {
+  item: NewsItem;
+  onClose: () => void;
+  onSave: (updated: NewsItem) => void;
+}) {
+  const [title, setTitle] = useState(item.title);
+  const [category, setCategory] = useState(item.category);
+  const [author, setAuthor] = useState(item.author);
+  const [summary, setSummary] = useState(item.summary);
+  const [content, setContent] = useState(item.content);
+  const [imageUrl, setImageUrl] = useState(item.imageUrl || '');
+  const [pinned, setPinned] = useState(Boolean(item.pinned));
+  const [isAnnouncement, setIsAnnouncement] = useState(Boolean(item.isAnnouncement));
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const handleSave = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!title.trim() || !summary.trim()) {
+      setErrorMsg('El título y el resumen son obligatorios.');
+      return;
+    }
+    onSave({
+      ...item,
+      title: title.trim(),
+      category,
+      author: author.trim() || 'Instituto de Capacitación Legislativa',
+      summary: summary.trim(),
+      content: content.trim() || summary.trim(),
+      imageUrl: imageUrl.trim() || undefined,
+      pinned,
+      isAnnouncement,
+    });
+    onClose();
+  };
+
+  return (
+    <div
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="news-edit-title"
+      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 overflow-y-auto"
+    >
+      <form
+        onSubmit={handleSave}
+        className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-lg p-5 sm:p-6 space-y-3.5"
+      >
+        <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
+          <h3 id="news-edit-title" className="text-sm font-bold text-[#001428]">
+            Editar Comunicado
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Cerrar"
+            className="text-slate-400 hover:text-slate-700 transition-colors cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div>
+          <label htmlFor="ne-title" className="block text-[11px] font-bold text-[#001428] mb-1">Título *</label>
+          <input
+            id="ne-title"
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
+          />
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label htmlFor="ne-category" className="block text-[11px] font-bold text-[#001428] mb-1">Categoría</label>
+            <select
+              id="ne-category"
+              value={category}
+              onChange={(e) => setCategory(e.target.value as NewsItem['category'])}
+              className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none bg-white"
+            >
+              {(['Institucional', 'Urgente', 'Capacitación', 'Programas', 'Novedad'] as const).map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label htmlFor="ne-author" className="block text-[11px] font-bold text-[#001428] mb-1">Autor / Área</label>
+            <input
+              id="ne-author"
+              type="text"
+              value={author}
+              onChange={(e) => setAuthor(e.target.value)}
+              className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
+            />
+          </div>
+        </div>
+
+        <div>
+          <label htmlFor="ne-summary" className="block text-[11px] font-bold text-[#001428] mb-1">Resumen *</label>
+          <textarea
+            id="ne-summary"
+            rows={2}
+            value={summary}
+            onChange={(e) => setSummary(e.target.value)}
+            className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none resize-none"
+          />
+        </div>
+
+        <div>
+          <label htmlFor="ne-content" className="block text-[11px] font-bold text-[#001428] mb-1">Contenido completo</label>
+          <textarea
+            id="ne-content"
+            rows={5}
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none resize-none"
+          />
+        </div>
+
+        <div>
+          <label htmlFor="ne-image" className="block text-[11px] font-bold text-[#001428] mb-1">URL de imagen (opcional)</label>
+          <input
+            id="ne-image"
+            type="text"
+            value={imageUrl}
+            onChange={(e) => setImageUrl(e.target.value)}
+            placeholder="https://…"
+            className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
+          />
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+          <label className="flex items-center gap-2 text-xs text-slate-700 font-semibold cursor-pointer">
+            <input type="checkbox" checked={pinned} onChange={(e) => setPinned(e.target.checked)} className="accent-[#0284c7]" />
+            <span>Fijar arriba (prioritario)</span>
+          </label>
+          <label className="flex items-center gap-2 text-xs text-slate-700 font-semibold cursor-pointer">
+            <input type="checkbox" checked={isAnnouncement} onChange={(e) => setIsAnnouncement(e.target.checked)} className="accent-[#0284c7]" />
+            <span>Es el Aviso Interno activo</span>
+          </label>
+        </div>
+
+        {errorMsg && (
+          <p className="text-[11px] text-rose-700 font-bold">{errorMsg}</p>
+        )}
+
+        <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2 rounded-lg border border-slate-300 text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+          >
+            Cancelar
+          </button>
+          <button
+            type="submit"
+            className="px-4 py-2 rounded-lg bg-[#001428] hover:bg-[#122a45] text-white text-xs font-bold transition-colors cursor-pointer shadow-xs"
+          >
+            Guardar cambios
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/** Botonera admin por comunicado: editar + eliminar (solo administradores). */
+function NewsAdminActions({ onEdit, onDelete }: { onEdit: () => void; onDelete: () => void }) {
+  return (
+    <div className="flex items-center gap-1 shrink-0">
+      <button
+        type="button"
+        onClick={onEdit}
+        title="Editar comunicado"
+        aria-label="Editar comunicado"
+        className="p-1.5 rounded-md border border-slate-200 text-slate-500 hover:text-[#0284c7] hover:border-[#0284c7] transition-colors cursor-pointer"
+      >
+        <Pencil className="w-3.5 h-3.5" />
+      </button>
+      <button
+        type="button"
+        onClick={onDelete}
+        title="Eliminar comunicado"
+        aria-label="Eliminar comunicado"
+        className="p-1.5 rounded-md border border-rose-200 text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+      </button>
     </div>
   );
 }

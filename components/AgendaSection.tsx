@@ -27,6 +27,7 @@ import {
   Award,
   Mail,
   Star,
+  Trash2,
 } from 'lucide-react';
 import { ActivityItem, ResourceDocument } from '@/lib/mock-data';
 import {
@@ -60,6 +61,8 @@ interface AgendaSectionProps {
   onUpdateActivityStatus?: (id: string, status: ActivityItem['status'], reason?: string) => void;
   /** Persistencia completa de la actividad (encuesta CSAT: token/fecha de envío). */
   onUpdateActivityFull?: (activity: ActivityItem) => void;
+  /** Elimina DEFINITIVAMENTE la actividad del cronograma (solo canceladas). */
+  onDeleteActivity?: (id: string) => void;
   /** Abre el composer de Gmail del sistema con destinatario/asunto/cuerpo pre-armados. */
   onOpenEmailModal?: (to: string, subject: string, body: string) => void;
 }
@@ -157,6 +160,7 @@ export function AgendaSection({
   isAdmin,
   onUpdateActivityStatus,
   onUpdateActivityFull,
+  onDeleteActivity,
   onOpenEmailModal,
 }: AgendaSectionProps) {
   const [activeTab, setActiveTab] = useState<'todas' | 'visita' | 'capacitacion' | 'sesion' | 'coordinacion'>('todas');
@@ -191,6 +195,7 @@ export function AgendaSection({
   });
 
   const [isCancellingInModal, setIsCancellingInModal] = useState(false);
+  const [isDeletingInModal, setIsDeletingInModal] = useState(false);
   const [cancelReasonInput, setCancelReasonInput] = useState('');
 
   // Input del destinatario CSAT: se sincroniza con la actividad abierta en la ficha.
@@ -198,6 +203,7 @@ export function AgendaSection({
     setCsatEmailInput(selectedActivity?.contactEmail ?? '');
     setCsurveyEmailError(null);
     setIsCancellingInModal(false);
+    setIsDeletingInModal(false);
     setCancelReasonInput('');
   }, [selectedActivity?.id, selectedActivity?.contactEmail]);
 
@@ -2679,6 +2685,46 @@ export function AgendaSection({
                         </button>
                       </div>
                     </div>
+                  )}
+
+                  {selectedActivity.status === 'cancelada' && onDeleteActivity && (
+                    isDeletingInModal ? (
+                      <div className="w-full mt-2.5 p-3 bg-rose-50 border border-rose-400 rounded-lg space-y-2 text-xs animate-in fade-in duration-150">
+                        <div className="font-bold text-rose-900">
+                          ¿Eliminar DEFINITIVAMENTE esta visita del cronograma? Esta acción no se puede deshacer.
+                        </div>
+                        <div className="flex items-center justify-end gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => setIsDeletingInModal(false)}
+                            className="px-2.5 py-1 text-slate-600 hover:text-slate-900 font-semibold text-xs rounded hover:bg-rose-100/60"
+                          >
+                            Volver
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onDeleteActivity(selectedActivity.id);
+                              setSelectedActivity(null);
+                              setIsDeletingInModal(false);
+                            }}
+                            className="px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded shadow-xs"
+                          >
+                            Eliminar para siempre
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setIsDeletingInModal(true)}
+                        className="mt-2.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50 font-bold text-xs transition-colors cursor-pointer"
+                        title="Quita la visita del cronograma (solo disponible en visitas canceladas)"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Eliminar visita</span>
+                      </button>
+                    )
                   )}
                 </div>
               )}
