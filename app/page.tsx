@@ -396,6 +396,7 @@ export default function IntranetApp() {
     setUser(profile);
     setAccessToken(token);
     touchSession();
+    reloadData();
     const count = getAuthorizedUsers().filter((u) => u.status === 'pendiente').length;
     setPendingApprovalsCount(count);
     showToast(

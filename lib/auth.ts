@@ -449,6 +449,10 @@ if (typeof window !== 'undefined') {
 let diagnosticsRan = false;
 
 function applySyncGate(authorized: boolean): void {
+  if (!authorized) {
+    usersSyncStarted = false;
+    approvalModeSyncStarted = false;
+  }
   setFirestoreSyncGate(authorized);
   // Un solo diagnóstico de acceso por sesión, con la sesión ADMIN:
   // distingue "reglas no visibles para esta app/base" de "cuenta no admin".
@@ -1585,6 +1589,7 @@ export const googleSignIn = async (options?: GoogleSignInOptions): Promise<SignI
     };
     cachedUserProfile = profile;
     storeUserProfile(profile);
+    applySyncGate(true);
 
     return { profile, accessToken: cachedAccessToken };
   } catch (error: unknown) {
@@ -1797,6 +1802,7 @@ export const googleGisSignIn = async (
 
   cachedUserProfile = profile;
   storeUserProfile(profile);
+  applySyncGate(true);
 
   return { profile, accessToken };
 };

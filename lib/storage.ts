@@ -21,6 +21,7 @@ import {
 } from './mock-data';
 import { generateId } from './utils';
 import {
+  deleteSingleDoc,
   ensureFirebaseApp,
   getIntranetDb,
   hasActivePushFailure,
@@ -141,6 +142,20 @@ function sortRemoteItems(key: string, items: Record<string, unknown>[]): Record<
   return NEWEST_FIRST_KEYS.has(key) ? sorted.reverse() : sorted;
 }
 
+let activeStorageSubscriptions: (() => void)[] = [];
+
+export function stopBackendSync(): void {
+  activeStorageSubscriptions.forEach((unsub) => {
+    try {
+      unsub();
+    } catch {
+      // Ignore
+    }
+  });
+  activeStorageSubscriptions = [];
+  backendSyncStarted = false;
+}
+
 /**
  * Inicializa la sincronización Firestore ⇄ localStorage (idempotente).
  * Si la app de Firebase todavía no existe (SSR o módulos que aún no cargaron),
@@ -168,7 +183,7 @@ function ensureBackendSync(): void {
         void pushCollectionDiff(collectionName, current as Record<string, unknown>[], idOf);
       }
     };
-    subscribeToCollection(collectionName, (remote) => {
+    const unsub = subscribeToCollection(collectionName, (remote) => {
       // Si el último push de esta clave falló (p. ej. reglas sin publicar), un snapshot
       // viejo NO debe revertir los cambios locales más recientes del usuario.
       if (hasActivePushFailure(collectionName)) return;
@@ -186,24 +201,18 @@ function ensureBackendSync(): void {
       } finally {
         suppressRemotePush = false;
       }
-      // La recuperación de escrituras que fallaron la cubre el AUTO-RETRY de pushes
-      // (schedulePushRetry en lib/firestore.ts): re-push de la lista completa mientras
-      // el push siga fallando. Sin reconciliación desde snapshots (resucitaba borrados).
     });
-    // Si Firestore no devuelve nada al conectar (offline del propio seed), igual se siembra
-    // los datos locales al primer push que ocurra con un cambio real.
+    if (unsub) activeStorageSubscriptions.push(unsub);
   });
 
   // 2) Documentos individuales (settings + lista de recursos eliminados)
-  // Firestore exige documento-objeto: los arrays de ids viajan envueltos.
   Object.entries(META_DOC_PATHS).forEach(([localKey, [col, docId]]) => {
     const pathKey = localKey as string;
     const pushLocalToRemote = () => {
       const value = safeGet(pathKey, pathKey === STORAGE_KEYS.SETTINGS ? {} : []);
       void pushSingleDoc(String(col), String(docId), wrapMetaValue(pathKey, value));
     };
-    subscribeToSingleDoc(String(col), String(docId), (remoteValue, exists) => {
-      // Mismo guard que las colecciones: mientras el push Local falla, no revertir.
+    const unsub = subscribeToSingleDoc(String(col), String(docId), (remoteValue, exists) => {
       if (hasActivePushFailure(`${col}/${docId}`)) return;
       if (!exists) {
         if (!isBootstrapped(pathKey)) {
@@ -218,10 +227,8 @@ function ensureBackendSync(): void {
       } finally {
         suppressRemotePush = false;
       }
-      // La recuperación de escrituras que fallaron la cubre el AUTO-RETRY de pushes
-      // (schedulePushRetry en lib/firestore.ts): re-push de la lista completa mientras
-      // el push siga fallando. Sin reconciliación desde snapshots (resucitaba borrados).
     });
+    if (unsub) activeStorageSubscriptions.push(unsub);
   });
 }
 
@@ -252,7 +259,6 @@ function pushRemoteUnlessSuppressed(key: string, value: unknown): void {
       const idOf = (item: Record<string, unknown>): string => String(item?.id ?? '');
       void pushCollectionDiff(collectionName, value as Record<string, unknown>[], idOf);
     } else {
-      // No debería ocurrir: las claves de colección siempre guardan arrays.
       console.warn(`Storage key ${key} no guarda una lista; no se sincronizó.`);
     }
     return;
@@ -270,9 +276,15 @@ export function initSharedBackend(): void {
   ensureBackendSync();
 }
 
-// Sin sesión aprobada los listeners no se abren: al loguear el gate re-invoca esto.
+// Sin sesión aprobada los listeners no se abren: al loguear el gate re-invoca esto; al desloguear limpia.
 if (typeof window !== 'undefined') {
-  registerGateOpenHandler(() => ensureBackendSync());
+  registerGateOpenHandler(() => {
+    if (isSyncGateOpen()) {
+      ensureBackendSync();
+    } else {
+      stopBackendSync();
+    }
+  });
 }
 
 /** Los tests/mock previos convivieron con estas claves: una v1 con datos de prueba. */
@@ -359,6 +371,7 @@ export function saveActivity(activity: ActivityItem): ActivityItem[] {
 export function deleteActivity(id: string): ActivityItem[] {
   const updated = removeById(getActivities(), id);
   safeSet(STORAGE_KEYS.ACTIVITIES, updated);
+  void deleteSingleDoc('activities', id).catch((e) => console.error('Error eliminando actividad de Firestore:', e));
   return updated;
 }
 
@@ -416,6 +429,7 @@ export function setAnnouncementNewsId(newsId: string | null): NewsItem[] {
 export function deleteNews(id: string): NewsItem[] {
   const updated = removeById(getNews(), id);
   safeSet(STORAGE_KEYS.NEWS, updated);
+  void deleteSingleDoc('news', id).catch((e) => console.error('Error eliminando comunicado de Firestore:', e));
   return updated;
 }
 
@@ -433,6 +447,7 @@ export function saveCourse(course: TrainingCourse): TrainingCourse[] {
 export function deleteCourse(id: string): TrainingCourse[] {
   const updated = removeById(getCourses(), id);
   safeSet(STORAGE_KEYS.COURSES, updated);
+  void deleteSingleDoc('courses', id).catch((e) => console.error('Error eliminando curso de Firestore:', e));
   return updated;
 }
 
@@ -450,6 +465,7 @@ export function saveProgram(program: ProjectProgram): ProjectProgram[] {
 export function deleteProgram(id: string): ProjectProgram[] {
   const updated = removeById(getPrograms(), id);
   safeSet(STORAGE_KEYS.PROGRAMS, updated);
+  void deleteSingleDoc('programs', id).catch((e) => console.error('Error eliminando programa de Firestore:', e));
   return updated;
 }
 
@@ -494,6 +510,7 @@ export function deleteResource(id: string): ResourceDocument[] {
   if (!deletedIds.includes(id)) {
     safeSet(STORAGE_KEYS.DELETED_RESOURCES, [...deletedIds, id]);
   }
+  void deleteSingleDoc('resources', id).catch((e) => console.error('Error eliminando recurso de Firestore:', e));
   return updated;
 }
 
@@ -511,6 +528,7 @@ export function saveQuickLink(link: QuickLink): QuickLink[] {
 export function deleteQuickLink(id: string): QuickLink[] {
   const updated = removeById(getQuickLinks(), id);
   safeSet(STORAGE_KEYS.LINKS, updated);
+  void deleteSingleDoc('links', id).catch((e) => console.error('Error eliminando enlace de Firestore:', e));
   return updated;
 }
 
@@ -528,6 +546,7 @@ export function saveTeamMember(member: TeamMember): TeamMember[] {
 export function deleteTeamMember(id: string): TeamMember[] {
   const updated = removeById(getTeam(), id);
   safeSet(STORAGE_KEYS.TEAM, updated);
+  void deleteSingleDoc('team', id).catch((e) => console.error('Error eliminando integrante de Firestore:', e));
   return updated;
 }
 
@@ -556,6 +575,7 @@ export function deleteInstituteArea(id: string): InstituteAreaCard[] {
   const current = getInstituteAreas();
   const updated = current.filter((a) => a.id !== id);
   const reindexed = updated.map((card, idx) => ({ ...card, order: idx + 1 }));
+  void deleteSingleDoc('institute_areas', id).catch((e) => console.error('Error eliminando área de Firestore:', e));
   return saveInstituteAreas(reindexed);
 }
 
