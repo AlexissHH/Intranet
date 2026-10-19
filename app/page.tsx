@@ -291,6 +291,7 @@ export default function IntranetApp() {
     setQuickLinks(getQuickLinks());
     setTeam(getTeam());
     setInstSettings(getInstitutionalSettings());
+    setPendingApprovalsCount(getAuthorizedUsers().filter((u) => u.status === 'pendiente').length);
   }, []);
 
   useEffect(() => {
@@ -305,6 +306,7 @@ export default function IntranetApp() {
       // e.key === null: se vació todo el localStorage desde otra pestaña.
       if (!e.key || e.key.startsWith('icl_intranet_')) {
         reloadData();
+        setPendingApprovalsCount(getAuthorizedUsers().filter((u) => u.status === 'pendiente').length);
       }
     };
     window.addEventListener('storage', handleStorageChange);

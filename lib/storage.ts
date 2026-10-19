@@ -20,8 +20,6 @@ import {
   INITIAL_COURSE_AUDITS,
 } from './mock-data';
 import { generateId } from './utils';
-import { getCurrentUserProfile, getAuthorizedUsers } from './auth';
-import { isMasterAdminEmail } from './access-config';
 import {
   ensureFirebaseApp,
   getIntranetDb,
@@ -30,9 +28,7 @@ import {
   isSyncGateOpen,
   markBootstrapped,
   pushCollectionDiff,
-  pushMissingOnly,
   pushSingleDoc,
-  pushSingleDocIfMissing,
   registerGateOpenHandler,
   replaceCollection,
   subscribeToCollection,
@@ -190,9 +186,9 @@ function ensureBackendSync(): void {
       } finally {
         suppressRemotePush = false;
       }
-      // Reconciliación (una vez por sesión/colección): trae a Firestore los registros
-      // que quedaron huérfanos por un push fallido anterior. Solo SUBE, nunca borra.
-      reconcileMissingRecords(collectionName, localKey, idOf);
+      // La recuperación de escrituras que fallaron la cubre el AUTO-RETRY de pushes
+      // (schedulePushRetry en lib/firestore.ts): re-push de la lista completa mientras
+      // el push siga fallando. Sin reconciliación desde snapshots (resucitaba borrados).
     });
     // Si Firestore no devuelve nada al conectar (offline del propio seed), igual se siembra
     // los datos locales al primer push que ocurra con un cambio real.
@@ -222,60 +218,11 @@ function ensureBackendSync(): void {
       } finally {
         suppressRemotePush = false;
       }
-      // Reconciliación de docs individuales (recuperar settings perdidos del seed).
-      reconcileMetaOnce(String(col), String(docId), pathKey);
+      // La recuperación de escrituras que fallaron la cubre el AUTO-RETRY de pushes
+      // (schedulePushRetry en lib/firestore.ts): re-push de la lista completa mientras
+      // el push siga fallando. Sin reconciliación desde snapshots (resucitaba borrados).
     });
   });
-}
-
-/** Colecciones por colección: reconciliación hecha una vez por sesión. */
-const reconciledCollections = new Set<string>();
-
-/**
- * Recupera registros huérfanos (escritos localmente cuando el push falló) en el momento
- * en que la colección confirma su estado remoto por primera vez en la sesión.
- */
-function reconcileMissingRecords(
-  collectionName: string,
-  localKey: string,
-  idOf: (item: Record<string, unknown>) => string
-): void {
-  if (reconciledCollections.has(collectionName)) return;
-  reconciledCollections.add(collectionName);
-  const current = safeGet<unknown[]>(localKey, []);
-  if (!Array.isArray(current) || current.length === 0) return;
-  void pushMissingOnly(collectionName, current as Record<string, unknown>[], idOf);
-}
-
-/** Documentos individuales reconciliados una vez por sesión. */
-const reconciledMetaDocs = new Set<string>();
-
-/**
- * Igual que la anterior, para settings/deleted_resources: si el doc remoto NO existe
- * y hay contenido local, se publica (recupera configuración perdida del seed inicial).
- * Solo desde dispositivos administradores: las reglas desestiman a los espectadores y
- * causarían errores de escritura repetidos innecesarios.
- */
-function reconcileMetaOnce(col: string, docId: string, localKey: string): void {
-  const key = `${col}/${docId}`;
-  if (reconciledMetaDocs.has(key)) return;
-  if (!isCurrentDeviceAdmin()) return; // el dispositivo admin lo hará
-  reconciledMetaDocs.add(key);
-  const value = safeGet(localKey, localKey === STORAGE_KEYS.SETTINGS ? {} : []);
-  if (localKey !== STORAGE_KEYS.SETTINGS && (!Array.isArray(value) || value.length === 0)) return;
-  void pushSingleDocIfMissing(col, docId, wrapMetaValue(localKey, value));
-}
-
-/** TRUE si el usuario en sesión es admin maestro o admin aprobado en la lista del backend. */
-function isCurrentDeviceAdmin(): boolean {
-  if (typeof window === 'undefined') return false;
-  const profile = getCurrentUserProfile();
-  if (!profile?.email) return false;
-  if (isMasterAdminEmail(profile.email)) return true;
-  const record = getAuthorizedUsers().find(
-    (u) => u.email.toLowerCase() === profile.email!.toLowerCase()
-  );
-  return record?.role === 'administrador' && record?.status === 'aprobado';
 }
 
 /** Arrays (lista de ids eliminados) viajan dentro de un objeto-doc: envoltorio de salida. */

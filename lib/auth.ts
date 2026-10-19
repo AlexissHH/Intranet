@@ -15,6 +15,7 @@ import {
   type Auth,
   type User,
 } from 'firebase/auth';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 import defaultFirebaseConfig from '../firebase-applet-config.json';
 import {
   MASTER_ADMIN_EMAIL,
@@ -27,10 +28,12 @@ import {
 } from './access-config';
 import { generateId } from './utils';
 import {
+  deleteSingleDoc,
+  ensureFirestoreReady,
+  getIntranetDb,
   hasActivePushFailure,
   isSyncGateOpen,
   pushCollectionDiff,
-  pushMissingOnly,
   pushSingleDoc,
   registerGateOpenHandler,
   runAccessDiagnostics,
@@ -419,7 +422,7 @@ function ensureUsersSync(): void {
       // Sin base aún: se siembran los administradores del entorno (master pueden crear por reglas).
       void pushCollectionDiff(
         AUTHORIZED_USERS_COLLECTION,
-        getAuthorizedUsers() as unknown as Record<string, unknown>[],
+        initialUsers() as unknown as Record<string, unknown>[],
         (u) => (typeof u.email === 'string' ? u.email.toLowerCase().trim() : '')
       );
       return;
@@ -475,9 +478,11 @@ function materializeRemoteUser(doc: Record<string, unknown>): AuthorizedUser | n
   };
 }
 
-/** Aplica el snapshot remoto: el doc remoto manda por email; los solo-locales se conservan. */
+/**
+ * Aplica el snapshot remoto: Firestore es la fuente de verdad.
+ * Los usuarios eliminados en Firestore NO se conservan localmente ni se vuelven a subir.
+ */
 function applyRemoteUsers(remoteDocs: Record<string, unknown>[]): void {
-  const local = getAuthorizedUsers();
   const remoteUsers = remoteDocs
     .map(materializeRemoteUser)
     .filter((u): u is AuthorizedUser => u !== null);
@@ -485,14 +490,16 @@ function applyRemoteUsers(remoteDocs: Record<string, unknown>[]): void {
 
   const merged: AuthorizedUser[] = [];
   const seen = new Set<string>();
-  // 1) Solo-locales primero (conservan su id/posición), completados con los datos remotos si existe el email.
-  for (const u of local) {
-    const email = u.email.toLowerCase();
+
+  // 1) Administradores maestros obligatorios del entorno (siempre deben existir)
+  for (const admin of initialUsers()) {
+    const email = admin.email.toLowerCase();
     seen.add(email);
     const remote = remoteByEmail.get(email);
-    merged.push(remote ? { ...u, ...remote, id: u.id } : u);
+    merged.push(remote ? { ...admin, ...remote, role: 'administrador', status: 'aprobado' } : admin);
   }
-  // 2) Remotos por email
+
+  // 2) Documentos remotos de Firestore (usuarios autorizados, pendientes o rechazados)
   for (const [email, remote] of remoteByEmail) {
     if (!seen.has(email)) {
       merged.push(remote);
@@ -500,32 +507,12 @@ function applyRemoteUsers(remoteDocs: Record<string, unknown>[]): void {
     }
   }
 
-  // Reconciliación (una vez por sesión): sube a Firestore los usuarios que quedaron
-  // huérfanos por un push fallido (solo SUBE). Solo dispositivos administradores.
-  reconcileMissingUsers(remoteByEmail);
-
   try {
     localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(merged));
     notifyAuthorizedUsersChanged();
   } catch {
-    // Ignore (cache local no encuentra espacio: la fuente sigue siendo Firestore)
+    // Ignore (cache local sin espacio: la fuente sigue siendo Firestore)
   }
-}
-
-let usersReconciled = false;
-
-/** Recupera usuarios aprobados localmente que no llegaron al backend (justo admin). */
-function reconcileMissingUsers(remoteByEmail: Map<string, AuthorizedUser>): void {
-  if (usersReconciled || typeof window === 'undefined') return;
-  usersReconciled = true;
-  if (cachedUserProfile?.role !== 'administrador') return;
-  const localOnly = getAuthorizedUsers().filter((u) => !remoteByEmail.has(u.email.toLowerCase()));
-  if (localOnly.length === 0) return;
-  void pushMissingOnly(
-    AUTHORIZED_USERS_COLLECTION,
-    localOnly as unknown as Record<string, unknown>[],
-    userDocId
-  );
 }
 
 /** Notifica a la UI (evento storage) que la lista autorizada cambió desde el backend. */
@@ -662,26 +649,61 @@ export function setApprovalMode(mode: 'manual' | 'auto_visitor'): void {
   void pushSingleDoc('meta', 'approval_mode', { mode });
 }
 
+export function updateLocalUserRecord(record: AuthorizedUser): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const users = getAuthorizedUsers();
+    const cleanEmail = record.email.toLowerCase().trim();
+    const idx = users.findIndex((u) => u.email.toLowerCase().trim() === cleanEmail);
+    if (idx >= 0) {
+      users[idx] = { ...users[idx], ...record };
+    } else {
+      users.push(record);
+    }
+    localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+    notifyAuthorizedUsersChanged();
+  } catch {
+    // Ignore
+  }
+}
+
 export function approveUser(userId: string): AuthorizedUser[] {
   const users = getAuthorizedUsers();
+  let targetEmail = '';
+  let updatedRecord: AuthorizedUser | null = null;
   const updated = users.map((u) => {
     if (u.id === userId || u.email.toLowerCase() === userId.toLowerCase()) {
-      return {
+      targetEmail = u.email.toLowerCase().trim();
+      updatedRecord = {
         ...u,
         status: 'aprobado' as UserStatus,
         approvedAt: new Date().toISOString().split('T')[0],
       };
+      return updatedRecord;
     }
     return u;
   });
   saveAuthorizedUsers(updated);
+
+  if (targetEmail && updatedRecord) {
+    const database = getIntranetDb();
+    if (database) {
+      void setDoc(
+        doc(database, AUTHORIZED_USERS_COLLECTION, targetEmail),
+        updatedRecord as unknown as Record<string, unknown>,
+        { merge: true }
+      ).catch((err) => console.error('Error aprobando en Firestore:', err));
+    }
+  }
   return updated;
 }
 
 export function rejectUser(userId: string): AuthorizedUser[] {
   const users = getAuthorizedUsers();
+  let targetEmail = '';
   const updated = users.map((u) => {
     if ((u.id === userId || u.email.toLowerCase() === userId.toLowerCase()) && !isMasterAdminEmail(u.email)) {
+      targetEmail = u.email.toLowerCase().trim();
       return {
         ...u,
         status: 'rechazado' as UserStatus,
@@ -690,13 +712,42 @@ export function rejectUser(userId: string): AuthorizedUser[] {
     return u;
   });
   saveAuthorizedUsers(updated);
+
+  if (targetEmail) {
+    const database = getIntranetDb();
+    if (database) {
+      void setDoc(
+        doc(database, AUTHORIZED_USERS_COLLECTION, targetEmail),
+        { status: 'rechazado' },
+        { merge: true }
+      ).catch((err) => console.error('Error rechazando en Firestore:', err));
+    }
+  }
   return updated;
 }
 
 export function deleteAuthorizedUser(userId: string): AuthorizedUser[] {
   const users = getAuthorizedUsers();
-  const updated = users.filter((u) => u.id !== userId || isMasterAdminEmail(u.email));
-  saveAuthorizedUsers(updated);
+  const toDelete = users.find(
+    (u) => (u.id === userId || u.email.toLowerCase() === userId.toLowerCase()) && !isMasterAdminEmail(u.email)
+  );
+  const updated = users.filter(
+    (u) => (u.id !== userId && u.email.toLowerCase() !== userId.toLowerCase()) || isMasterAdminEmail(u.email)
+  );
+  
+  try {
+    localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(updated));
+    notifyAuthorizedUsersChanged();
+  } catch (e) {
+    console.error('Error actualizando storage tras borrar usuario:', e);
+  }
+
+  if (toDelete) {
+    const targetEmail = toDelete.email.toLowerCase().trim();
+    void deleteSingleDoc(AUTHORIZED_USERS_COLLECTION, targetEmail).catch((err) => {
+      console.error('Error eliminando de Firestore:', err);
+    });
+  }
   return updated;
 }
 
@@ -716,6 +767,7 @@ export function addAuthorizedEmployee(email: string, displayName: string): Autho
   const existingIndex = users.findIndex((u) => u.email.toLowerCase() === cleanEmail);
   const now = new Date().toISOString().split('T')[0];
 
+  let savedRecord: AuthorizedUser;
   if (existingIndex >= 0) {
     const updated = [...users];
     updated[existingIndex] = {
@@ -724,23 +776,33 @@ export function addAuthorizedEmployee(email: string, displayName: string): Autho
       status: 'aprobado',
       approvedAt: now,
     };
+    savedRecord = updated[existingIndex];
     saveAuthorizedUsers(updated);
-    return updated[existingIndex];
+  } else {
+    const newUser: AuthorizedUser = {
+      id: newUserId(),
+      email: cleanEmail,
+      displayName: cleanName,
+      role: 'visitante', // Employees are strictly visitors
+      status: 'aprobado',
+      createdAt: now,
+      approvedAt: now,
+    };
+    savedRecord = newUser;
+    users.push(newUser);
+    saveAuthorizedUsers(users);
   }
 
-  const newUser: AuthorizedUser = {
-    id: newUserId(),
-    email: cleanEmail,
-    displayName: cleanName,
-    role: 'visitante', // Employees are strictly visitors
-    status: 'aprobado',
-    createdAt: now,
-    approvedAt: now,
-  };
+  const database = getIntranetDb();
+  if (database) {
+    void setDoc(
+      doc(database, AUTHORIZED_USERS_COLLECTION, cleanEmail),
+      savedRecord as unknown as Record<string, unknown>,
+      { merge: true }
+    ).catch((err) => console.error('Error guardando integrante en Firestore:', err));
+  }
 
-  users.push(newUser);
-  saveAuthorizedUsers(users);
-  return newUser;
+  return savedRecord;
 }
 
 export interface AuthCheckResult {
@@ -855,6 +917,133 @@ export function checkUserAuthorization(email: string, displayName: string): Auth
     status: 'pendiente',
     message: 'Tu registro ha sido enviado al Administrador del Sistema. Podrás ingresar como Visitante (consulta) una vez que sea autorizado.',
   };
+}
+
+/**
+ * Verifica y sincroniza el estado de autorización del usuario directamente con Firestore
+ * mientras la sesión de Google sigue autenticada en Firebase (request.auth != null).
+ * Si es un usuario nuevo, crea su ficha en authorized_users/{email} en tiempo real.
+ */
+export async function syncAndCheckUserInFirestore(
+  firebaseUser: User,
+  fallbackDisplayName?: string
+): Promise<AuthCheckResult> {
+  const cleanEmail = (firebaseUser.email || '').trim().toLowerCase();
+  if (!cleanEmail) {
+    return {
+      authorized: false,
+      role: 'visitante',
+      status: 'rechazado',
+      message: 'Tu cuenta de Google no informó un correo electrónico, por lo que no puede ser verificada.',
+    };
+  }
+
+  // Master admin check: siempre autorizado
+  if (isMasterAdminEmail(cleanEmail)) {
+    return {
+      authorized: true,
+      role: 'administrador',
+      status: 'aprobado',
+    };
+  }
+
+  // Pre-configured allowed visitors: siempre autorizados
+  if (isAllowedVisitorEmail(cleanEmail)) {
+    return {
+      authorized: true,
+      role: 'visitante',
+      status: 'aprobado',
+    };
+  }
+
+  const displayName = fallbackDisplayName?.trim() || firebaseUser.displayName?.trim() || cleanEmail.split('@')[0];
+  const now = new Date().toISOString().split('T')[0];
+
+  try {
+    const database = await ensureFirestoreReady();
+    if (database) {
+      const userDocRef = doc(database, AUTHORIZED_USERS_COLLECTION, cleanEmail);
+      const snap = await getDoc(userDocRef);
+
+      if (snap.exists()) {
+        const data = snap.data();
+        const role: UserRole = data.role === 'administrador' ? 'administrador' : 'visitante';
+        const status: UserStatus =
+          data.status === 'aprobado' ? 'aprobado' : data.status === 'rechazado' ? 'rechazado' : 'pendiente';
+
+        const record: AuthorizedUser = {
+          id: typeof data.id === 'string' && data.id ? data.id : `user-${cleanEmail.replace(/[^a-z0-9]/g, '_')}`,
+          email: cleanEmail,
+          displayName: typeof data.displayName === 'string' && data.displayName ? data.displayName : displayName,
+          role,
+          status,
+          createdAt: typeof data.createdAt === 'string' ? data.createdAt : now,
+          ...(typeof data.approvedAt === 'string' ? { approvedAt: data.approvedAt } : {}),
+        };
+        updateLocalUserRecord(record);
+
+        if (status === 'aprobado') {
+          return { authorized: true, role, status: 'aprobado' };
+        }
+        if (status === 'rechazado') {
+          return {
+            authorized: false,
+            role,
+            status: 'rechazado',
+            message: 'El acceso para este correo ha sido revocado por el Administrador del Sistema.',
+          };
+        }
+        return {
+          authorized: false,
+          role,
+          status: 'pendiente',
+          message: 'Tu solicitud de acceso está registrada y pendiente de aprobación por el Administrador del Sistema.',
+        };
+      }
+
+      // Nuevo usuario: auto-registro en Firestore con la sesión de Google activa
+      const mode = getApprovalMode();
+      const initialStatus: UserStatus = mode === 'auto_visitor' ? 'aprobado' : 'pendiente';
+      const newRecord: AuthorizedUser = {
+        id: `user-${cleanEmail.replace(/[^a-z0-9]/g, '_')}`,
+        email: cleanEmail,
+        displayName,
+        role: 'visitante',
+        status: initialStatus,
+        createdAt: now,
+        ...(initialStatus === 'aprobado' ? { approvedAt: now } : {}),
+      };
+
+      // Guardar directamente en Firestore con el token autenticado de Google
+      await setDoc(userDocRef, {
+        id: newRecord.id,
+        email: newRecord.email,
+        displayName: newRecord.displayName,
+        role: newRecord.role,
+        status: newRecord.status,
+        createdAt: newRecord.createdAt,
+        ...(newRecord.approvedAt ? { approvedAt: newRecord.approvedAt } : {}),
+      });
+
+      updateLocalUserRecord(newRecord);
+
+      if (initialStatus === 'aprobado') {
+        return { authorized: true, role: 'visitante', status: 'aprobado' };
+      }
+      return {
+        authorized: false,
+        role: 'visitante',
+        status: 'pendiente',
+        message:
+          'Tu registro ha sido enviado al Administrador del Sistema en tiempo real. Podrás ingresar como Visitante (consulta) una vez que sea autorizado.',
+      };
+    }
+  } catch (err) {
+    console.warn('No se pudo verificar/crear usuario en Firestore:', err);
+  }
+
+  // Fallback offline / local
+  return checkUserAuthorization(cleanEmail, displayName);
 }
 
 let cachedAccessToken: string | null = null;
@@ -1158,7 +1347,7 @@ export const initAuth = (
         const email = redirectResult.user.email || '';
         const displayName =
           redirectResult.user.displayName || email.split('@')[0] || 'Usuario Google';
-        const authCheck = checkUserAuthorization(email, displayName);
+        const authCheck = await syncAndCheckUserInFirestore(redirectResult.user, displayName);
         if (!authCheck.authorized) {
           applySyncGate(false);
           await signOut(activeAuth);
@@ -1195,7 +1384,7 @@ export const initAuth = (
         cachedAccessToken = getStoredAccessToken();
       }
       const email = firebaseUser.email || '';
-      const authCheck = checkUserAuthorization(email, firebaseUser.displayName || '');
+      const authCheck = await syncAndCheckUserInFirestore(firebaseUser, firebaseUser.displayName || '');
 
       if (!authCheck.authorized) {
         applySyncGate(false);
@@ -1373,8 +1562,8 @@ export const googleSignIn = async (options?: GoogleSignInOptions): Promise<SignI
     const email = result.user.email || '';
     const displayName = result.user.displayName || email.split('@')[0] || 'Usuario Google';
 
-    // Verify approval
-    const authCheck = checkUserAuthorization(email, displayName);
+    // Verify approval directly in Firestore while Google auth is active
+    const authCheck = await syncAndCheckUserInFirestore(result.user, displayName);
     if (!authCheck.authorized) {
       await signOut(activeAuth);
       storeAccessToken(null);
@@ -1579,7 +1768,11 @@ export const googleGisSignIn = async (
     console.warn('Firebase credential bridge notice:', bridgeErr);
   }
 
-  const authCheck = checkUserAuthorization(email, displayName);
+  const activeAuth = getActiveAuth();
+  const fbUser = activeAuth.currentUser;
+  const authCheck = fbUser
+    ? await syncAndCheckUserInFirestore(fbUser, displayName)
+    : checkUserAuthorization(email, displayName);
   if (!authCheck.authorized) {
     storeAccessToken(null);
     throw codedError(
@@ -1638,8 +1831,7 @@ export const institutionalSignIn = (data: {
   const authCheck = checkUserAuthorization(cleanEmail, cleanName);
   if (!authCheck.authorized) {
     throw codedError(
-      authCheck.message ||
-        'Tu solicitud de acceso está pendiente de aprobación por el Administrador del Sistema.',
+      'Para registrar tu solicitud de acceso y verificar tu identidad institucional por primera vez, por favor utiliza la pestaña "Cuenta Google" ("Continuar con Google").',
       'auth/pending-approval'
     );
   }

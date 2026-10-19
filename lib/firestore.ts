@@ -21,6 +21,7 @@ import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
 import defaultFirebaseConfig from '../firebase-applet-config.json';
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -43,6 +44,8 @@ export const VISIT_CSAT_COLLECTION = 'visit_csat';
 const MAX_DOC_BYTES = 1024 * 1024;
 /** Firestore admite hasta 500 operaciones por lote; dejamos margen. */
 const BATCH_MAX_OPS = 400;
+/** Espera de re-suscripción de un listener que murió (reglas publicadas tarde, red). */
+const LISTENER_RETRY_MS = 60_000;
 
 let db: Firestore | null = null;
 let readyReported = false;
@@ -379,82 +382,11 @@ export async function replaceCollection(
 }
 
 /**
- * Reconciliación de recuperación: sube SOLO los registros que están localmente y
- * NO existen en la base remota (conocidos por snapshot). Jamás borra nada remoto:
- * recupera escrituras que fallaron antes de publicar reglas / por red, sin pisar
- * datos creados por otros dispositivos.
- */
-export async function pushMissingOnly(
-  name: string,
-  items: Record<string, unknown>[],
-  idOf: (item: Record<string, unknown>) => string
-): Promise<void> {
-  const database = getIntranetDb();
-  if (!database) return;
-  const tracker = getTracker(name);
-  const missing = items.filter((i) => {
-    const id = idOf(i);
-    if (!id || tracker.known.has(id)) return false;
-    return docBytes(id, i) <= MAX_DOC_BYTES;
-  });
-  if (missing.length === 0) return;
-  try {
-    const batch = writeBatch(database);
-    let ops = 0;
-    for (const item of missing) {
-      if (ops >= BATCH_MAX_OPS) {
-        await batch.commit();
-        ops = 0;
-      }
-      batch.set(doc(database, name, idOf(item)), item);
-      ops++;
-    }
-    if (ops > 0) await batch.commit();
-    // Marcar como conocidos SOLO tras el commit: si falla, el reintento re-computa
-    // los faltantes contra un tracker intacto y los recupera de verdad.
-    for (const item of missing) {
-      const id = idOf(item);
-      if (!tracker.known.has(id)) tracker.known.set(id, JSON.stringify(item));
-    }
-    clearPushFailure(name);
-    reportReady();
-  } catch (e) {
-    markPushFailure(name);
-    schedulePushRetry(name, () => pushMissingOnly(name, items, idOf));
-    reportSyncError(e, name, 'escritura');
-  }
-}
-
-/**
- * Igual que `pushMissingOnly`, para documentos individuales: crea el doc remoto SÓLO
- * si no existe (no pisa el valor actual). Usado por la reconciliación de settings/meta.
- */
-export async function pushSingleDocIfMissing(
-  col: string,
-  docId: string,
-  value: unknown
-): Promise<void> {
-  const database = getIntranetDb();
-  if (!database) return;
-  const docRef = doc(database, col, docId);
-  try {
-    const snap = await getDoc(docRef);
-    if (snap.exists()) return;
-    await setDoc(docRef, value as Record<string, unknown>);
-    clearPushFailure(`${col}/${docId}`);
-    cancelPushRetry(`${col}/${docId}`);
-    reportReady();
-  } catch (e) {
-    markPushFailure(`${col}/${docId}`);
-    schedulePushRetry(`${col}/${docId}`, () => pushSingleDocIfMissing(col, docId, value));
-    reportSyncError(e, col, 'escritura');
-  }
-}
-
-/**
  * Escucha una colección: entrega un array con los datos de la base compartida.
  * Devuelve null si no hay sesión aprobada (gate cerrado): NO crea listeners que
  * morirían con permission-denied antes del login.
+ * RESILIENCIA: si el listener muere (p. ej. reglas recién publicadas, corte de red),
+ * se re-suscribe SOLO cada 60 s en vez de quedar sordo para siempre.
  */
 export function subscribeToCollection(
   name: string,
@@ -465,24 +397,48 @@ export function subscribeToCollection(
   if (!database) return null;
   const ref = collection(database, name);
   const tracker = getTracker(name);
-  return onSnapshot(
-    ref,
-    (snap) => {
-      if (!isSyncGateOpen()) return;
-      const items = snap.docs.map((d) => ({
-        ...(d.data() as Record<string, unknown>),
-        __id: d.id,
-      }));
-      tracker.known = new Map(items.map((i) => [i.__id as string, JSON.stringify({ ...i, __id: undefined })]));
-      tracker.bootstrapped = true;
-      reportReady();
-      onItems(items);
-    },
-    (err) => {
-      // Sin sesión ya no aplica: la propia app cerró el gate y el listener morirá.
-      if (isSyncGateOpen()) reportSyncError(err, name, 'lectura');
-    }
-  );
+
+  let activeUnsub: Unsubscribe | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let closed = false;
+
+  const attach = (): void => {
+    if (closed) return;
+    activeUnsub?.();
+    activeUnsub = onSnapshot(
+      ref,
+      (snap) => {
+        if (!isSyncGateOpen()) return;
+        const items = snap.docs.map((d) => ({
+          ...(d.data() as Record<string, unknown>),
+          __id: d.id,
+        }));
+        tracker.known = new Map(items.map((i) => [i.__id as string, JSON.stringify({ ...i, __id: undefined })]));
+        tracker.bootstrapped = true;
+        reportReady();
+        onItems(items);
+      },
+      (err) => {
+        if (!isSyncGateOpen()) return;
+        reportSyncError(err, name, 'lectura');
+        // Re-suscripción automática: las reglas pueden haberse publicado DESPUÉS de que
+        // este listener murió; sin esto la sesión queda sin sincronización en vivo.
+        if (!retryTimer && !closed) {
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            attach();
+          }, LISTENER_RETRY_MS);
+        }
+      }
+    );
+  };
+  attach();
+
+  return () => {
+    closed = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    activeUnsub?.();
+  };
 }
 
 /** Marca una colección ya inicializada (para no volver a hacer el seed bootstrap). */
@@ -513,7 +469,23 @@ export async function pushSingleDoc(col: string, docId: string, value: unknown):
   }
 }
 
-/** Escucha un documento individual; `exists` permite sembrar si aún no existe. */
+/** Elimina un documento individual directamente de Firestore. */
+export async function deleteSingleDoc(col: string, docId: string): Promise<void> {
+  const database = getIntranetDb();
+  if (!database) return;
+  const key = `${col}/${docId}`;
+  try {
+    await deleteDoc(doc(database, col, docId));
+    clearPushFailure(key);
+    cancelPushRetry(key);
+    reportReady();
+  } catch (e) {
+    reportSyncError(e, col, 'escritura');
+  }
+}
+
+/** Escucha un documento individual; `exists` permite sembrar si aún no existe.
+ *  Misma resiliencia que las colecciones: re-suscripción automática tras cada error. */
 export function subscribeToSingleDoc(
   col: string,
   docId: string,
@@ -522,17 +494,40 @@ export function subscribeToSingleDoc(
   if (!isSyncGateOpen()) return null;
   const database = getIntranetDb();
   if (!database) return null;
-  return onSnapshot(
-    doc(database, col, docId),
-    (snap) => {
-      if (!isSyncGateOpen()) return;
-      reportReady();
-      onValue(snap.data(), snap.exists());
-    },
-    (err) => {
-      if (isSyncGateOpen()) reportSyncError(err, col, 'lectura');
-    }
-  );
+
+  let activeUnsub: Unsubscribe | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let closed = false;
+
+  const attach = (): void => {
+    if (closed) return;
+    activeUnsub?.();
+    activeUnsub = onSnapshot(
+      doc(database, col, docId),
+      (snap) => {
+        if (!isSyncGateOpen()) return;
+        reportReady();
+        onValue(snap.data(), snap.exists());
+      },
+      (err) => {
+        if (!isSyncGateOpen()) return;
+        reportSyncError(err, col, 'lectura');
+        if (!retryTimer && !closed) {
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            attach();
+          }, LISTENER_RETRY_MS);
+        }
+      }
+    );
+  };
+  attach();
+
+  return () => {
+    closed = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    activeUnsub?.();
+  };
 }
 
 /** Mensaje útil según el código de error y operación (lectura/escritura). */

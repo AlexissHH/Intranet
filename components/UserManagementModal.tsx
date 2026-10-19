@@ -25,6 +25,8 @@ import {
   addAuthorizedEmployee,
   getApprovalMode,
   setApprovalMode,
+  USERS_STORAGE_KEY,
+  APPROVAL_MODE_KEY,
 } from '@/lib/auth';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
@@ -52,13 +54,22 @@ export function UserManagementModal({
 
   const userSheet = useBottomSheetDrag({ isOpen, onClose });
 
-  // Al abrir, releer los datos: pudieron llegar solicitudes nuevas desde que se montó el modal.
+  // Al abrir y en tiempo real: releer los datos ante cualquier cambio de Firestore
   useEffect(() => {
     if (!isOpen) return;
     setUsers(getAuthorizedUsers());
     setModeState(getApprovalMode());
     setPendingDeleteId(null);
     setErrorMessage(null);
+
+    const handleStorage = (e: StorageEvent) => {
+      if (!e.key || e.key === USERS_STORAGE_KEY || e.key === APPROVAL_MODE_KEY) {
+        setUsers(getAuthorizedUsers());
+        setModeState(getApprovalMode());
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
   }, [isOpen]);
 
   useEffect(() => {
