@@ -1226,6 +1226,10 @@ export default function IntranetApp() {
               © {new Date().getFullYear()} {instSettings.instituteName || 'Instituto de Capacitación y Gestión Pública'} - {instSettings.institutionSubtitle || 'Poder Legislativo'}. {instSettings.copyrightText || 'Todos los derechos reservados.'}
             </div>
             <div className="flex items-center gap-4">
+              <a href="/privacidad" className="hover:text-[#0284c7] transition-colors font-medium">
+                Política de Privacidad
+              </a>
+              <span className="text-slate-300">|</span>
               <span>Intranet institucional</span>
               {user?.role === 'administrador' && (
                 <button
