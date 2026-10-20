@@ -52,6 +52,15 @@ function parseNewsDateToYmd(raw?: string): string | null {
   if (!text) return null;
   const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
   if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const dmy = /^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/.exec(text);
+  if (dmy) {
+    const day = Number(dmy[1]);
+    const month = Number(dmy[2]);
+    const year = dmy[3];
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
   const m = /^(\d{1,2})\s+(?:de\s+)?([a-záé]{3,12})\.?(?:\s+de\s+)?(\d{4})\.?$/i.exec(text);
   if (!m) return null;
   const day = Number(m[1]);
@@ -123,6 +132,7 @@ export function HomeSection({
   /** Edición de comunicado (admin): item en edición + campos del formulario. */
   const [editingNews, setEditingNews] = useState<NewsItem | null>(null);
   const [newsToDelete, setNewsToDelete] = useState<NewsItem | null>(null);
+  const [showAllNews, setShowAllNews] = useState(false);
 
   React.useEffect(() => {
     setInstSettings(getInstitutionalSettings());
@@ -297,7 +307,9 @@ export function HomeSection({
   // El aviso interno toma estrictamente el comunicado asignado por el admin (isAnnouncement === true)
   // o en su defecto el primer comunicado relevante si está activo en Datos Institucionales.
   const activeAnnouncementNews = news.find((n) => n.isAnnouncement) || news.find((n) => n.pinned) || news[0];
-  const shouldShowInternalNotice = instSettings.isAnnouncementActive && Boolean(activeAnnouncementNews);
+  const shouldShowInternalNotice =
+    (instSettings.isAnnouncementActive || Boolean(activeAnnouncementNews?.isAnnouncement)) &&
+    Boolean(activeAnnouncementNews);
 
   const sortedNews = React.useMemo(() => {
     return [...news].sort((a, b) => {
@@ -314,8 +326,9 @@ export function HomeSection({
   }, [news]);
 
   // Límite visible en Inicio: 5 en la semana corriente; 6 si entre los primeros comunicados
-  // hay alguno con fecha posterior a la semana (avisos que venzan más adelante).
+  // hay alguno con fecha posterior a la semana (avisos que venzan más adelante); o todos si showAllNews está activo.
   const visibleNews = React.useMemo(() => {
+    if (showAllNews) return sortedNews;
     if (sortedNews.length <= NEWS_HOME_LIMIT_SAME_WEEK) return sortedNews;
     const hasPostWeekNews = sortedNews
       .slice(0, NEWS_HOME_LIMIT_WITH_FUTURE)
@@ -324,7 +337,7 @@ export function HomeSection({
         return Boolean(ymd) && Boolean(weekBounds.sundayYmd) && ymd! > weekBounds.sundayYmd;
       });
     return sortedNews.slice(0, hasPostWeekNews ? NEWS_HOME_LIMIT_WITH_FUTURE : NEWS_HOME_LIMIT_SAME_WEEK);
-  }, [sortedNews, weekBounds]);
+  }, [sortedNews, weekBounds, showAllNews]);
   const hiddenNewsCount = news.length - visibleNews.length;
 
   return (
@@ -670,127 +683,189 @@ export function HomeSection({
               )}
             </div>
 
-            <div className="space-y-4">
-              {visibleNews.map((item) => {
-                if (item.imageUrl) {
+            {visibleNews.length === 0 ? (
+              <div className="py-8 px-4 text-center border border-dashed border-slate-200 rounded-xl bg-slate-50/50 space-y-1.5">
+                <FileText className="w-8 h-8 text-slate-300 mx-auto mb-1" />
+                <p className="text-xs font-semibold text-slate-700">No hay novedades o comunicados publicados</p>
+                <p className="text-[11px] text-slate-500">
+                  Los comunicados institucionales y novedades del equipo aparecerán aquí en tiempo real para todos los integrantes.
+                </p>
+                {isAdmin && (
+                  <div className="pt-2">
+                    <button
+                      type="button"
+                      onClick={() => onOpenQuickAction('novedad')}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#001428] hover:bg-[#0e4a7b] text-white text-xs font-bold rounded-lg shadow-2xs transition-colors cursor-pointer"
+                    >
+                      <PlusCircle className="w-3.5 h-3.5" />
+                      <span>Publicar Primer Comunicado</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {visibleNews.map((item) => {
+                  if (item.imageUrl) {
+                    return (
+                      <div
+                        key={item.id}
+                        className="border border-slate-200 rounded-lg overflow-hidden bg-white hover:border-slate-300 transition-colors shadow-2xs"
+                      >
+                        <div className="flex flex-col sm:flex-row">
+                          <div className="relative sm:w-2/5 min-h-[170px] sm:min-h-[190px] bg-slate-100 shrink-0">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={item.imageUrl}
+                              alt={item.title}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover absolute inset-0"
+                              onError={(e) => {
+                                (e.currentTarget as HTMLImageElement).src = '/legislative_seminar.jpg';
+                              }}
+                            />
+                            <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 flex-wrap">
+                              <span className="px-2 py-0.5 bg-[#001428] text-white text-[10px] font-extrabold uppercase tracking-wider rounded shadow-xs">
+                                {item.category}
+                              </span>
+                              {item.isAnnouncement && (
+                                <span className="px-2 py-0.5 bg-blue-600 text-white text-[10px] font-extrabold uppercase tracking-wider rounded shadow-xs">
+                                  AVISO INTERNO
+                                </span>
+                              )}
+                              {item.pinned && !item.isAnnouncement && (
+                                <span className="px-2 py-0.5 bg-amber-500 text-white text-[10px] font-extrabold uppercase tracking-wider rounded shadow-xs">
+                                  PRIORITARIO
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="p-4 sm:p-5 sm:w-3/5 space-y-2 flex flex-col justify-between">
+                            <div className="space-y-1.5">
+                              <div className="flex items-center gap-1.5 text-[11px] text-slate-400 font-medium">
+                                <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                <span>Publicado: {item.date} • {item.author}</span>
+                              </div>
+                              <h3
+                                onClick={() => setSelectedNews(item)}
+                                className="text-sm sm:text-base font-bold text-[#001428] hover:text-[#0284c7] leading-tight cursor-pointer transition-colors"
+                              >
+                                {item.title}
+                              </h3>
+                              <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed">
+                                {item.summary}
+                              </p>
+                            </div>
+
+                            <div className="flex items-center gap-2 pt-2 flex-wrap">
+                              <button
+                                onClick={() => setSelectedNews(item)}
+                                className="px-3.5 py-1.5 bg-[#001428] hover:bg-[#0e4a7b] text-white text-xs font-semibold rounded shadow-2xs transition-colors cursor-pointer"
+                              >
+                                Ver Detalle & Comunicado
+                              </button>
+                              <button
+                                onClick={() => onNavigateTab('recursos')}
+                                className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded transition-colors cursor-pointer"
+                              >
+                                Descargar Resolución
+                              </button>
+                              {isAdmin && (onSaveNews || onDeleteNews) && (
+                                <div className="ml-auto flex items-center gap-1">
+                                  <NewsAdminActions
+                                    onEdit={() => setEditingNews(item)}
+                                    onDelete={() => setNewsToDelete(item)}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
                   return (
                     <div
                       key={item.id}
-                      className="border border-slate-200 rounded-lg overflow-hidden bg-white hover:border-slate-300 transition-colors shadow-2xs"
+                      className="p-3.5 rounded-lg border border-slate-200 bg-white hover:border-slate-300 transition-colors flex items-center justify-between gap-3 shadow-2xs"
                     >
-                      <div className="flex flex-col sm:flex-row">
-                        <div className="relative sm:w-2/5 min-h-[170px] sm:min-h-[190px] bg-slate-100 shrink-0">
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={item.imageUrl}
-                            alt={item.title}
-                            referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover absolute inset-0"
-                            onError={(e) => {
-                              (e.currentTarget as HTMLImageElement).src = '/legislative_seminar.jpg';
-                            }}
-                          />
-                          <div className="absolute top-2.5 left-2.5 px-2 py-0.5 bg-[#001428] text-white text-[10px] font-extrabold uppercase tracking-wider rounded shadow-xs">
-                            {item.category}
-                          </div>
+                      <div className="flex items-start gap-3 min-w-0">
+                        <div className="w-8 h-8 rounded-md bg-blue-50 text-[#0284c7] flex items-center justify-center shrink-0 border border-blue-100 mt-0.5">
+                          {item.category === 'Urgente' ? (
+                            <AlertCircle className="w-4 h-4 text-rose-600" />
+                          ) : item.category === 'Institucional' ? (
+                            <Shield className="w-4 h-4 text-[#0284c7]" />
+                          ) : item.category === 'Capacitación' ? (
+                            <GraduationCap className="w-4 h-4 text-[#0284c7]" />
+                          ) : (
+                            <FileText className="w-4 h-4 text-[#0284c7]" />
+                          )}
                         </div>
-
-                        <div className="p-4 sm:p-5 sm:w-3/5 space-y-2 flex flex-col justify-between">
-                          <div className="space-y-1.5">
-                            <div className="flex items-center gap-1.5 text-[11px] text-slate-400 font-medium">
-                              <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                              <span>Publicado: {item.date} • {item.author}</span>
-                            </div>
-                            <h3
-                              onClick={() => setSelectedNews(item)}
-                              className="text-sm sm:text-base font-bold text-[#001428] hover:text-[#0284c7] leading-tight cursor-pointer transition-colors"
-                            >
-                              {item.title}
-                            </h3>
-                            <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed">
-                              {item.summary}
-                            </p>
-                          </div>
-
-                          <div className="flex items-center gap-2 pt-2 flex-wrap">
-                            <button
-                              onClick={() => setSelectedNews(item)}
-                              className="px-3.5 py-1.5 bg-[#001428] hover:bg-[#0e4a7b] text-white text-xs font-semibold rounded shadow-2xs transition-colors cursor-pointer"
-                            >
-                              Ver Detalle & Comunicado
-                            </button>
-                            <button
-                              onClick={() => onNavigateTab('recursos')}
-                              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded transition-colors cursor-pointer"
-                            >
-                              Descargar Resolución
-                            </button>
-                            {isAdmin && (onSaveNews || onDeleteNews) && (
-                              <div className="ml-auto flex items-center gap-1">
-                                <NewsAdminActions
-                                  onEdit={() => setEditingNews(item)}
-                                  onDelete={() => setNewsToDelete(item)}
-                                />
-                              </div>
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-[#0284c7]">
+                              {item.category}
+                            </span>
+                            {item.isAnnouncement && (
+                              <span className="px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-blue-100 text-blue-800 border border-blue-200 uppercase tracking-wider">
+                                AVISO INTERNO
+                              </span>
                             )}
+                            {item.pinned && !item.isAnnouncement && (
+                              <span className="px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-amber-100 text-amber-800 border border-amber-200 uppercase tracking-wider">
+                                PRIORITARIO
+                              </span>
+                            )}
+                            <span className="text-slate-400 font-normal lowercase text-[10px]">
+                              • {item.date} {item.author ? `• ${item.author}` : ''}
+                            </span>
                           </div>
+                          <h4
+                            onClick={() => setSelectedNews(item)}
+                            className="text-xs sm:text-sm font-bold text-[#001428] hover:text-[#0284c7] cursor-pointer leading-tight transition-colors truncate"
+                          >
+                            {item.title}
+                          </h4>
+                          <p className="text-[11px] text-slate-600 line-clamp-1 leading-normal">
+                            {item.summary}
+                          </p>
                         </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={() => setSelectedNews(item)}
+                          className="text-slate-400 hover:text-slate-700 p-1.5 rounded-md hover:bg-slate-50 transition-colors cursor-pointer"
+                          title="Leer noticia completa"
+                        >
+                          <Eye className="w-4 h-4" />
+                        </button>
+                        {isAdmin && (onSaveNews || onDeleteNews) && (
+                          <NewsAdminActions
+                            onEdit={() => setEditingNews(item)}
+                            onDelete={() => setNewsToDelete(item)}
+                          />
+                        )}
                       </div>
                     </div>
                   );
-                }
+                })}
 
-                return (
-                  <div
-                    key={item.id}
-                    className="p-3.5 rounded-lg border border-slate-200 bg-white hover:border-slate-300 transition-colors flex items-center justify-between gap-3 shadow-2xs"
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="w-8 h-8 rounded-md bg-blue-50 text-[#0284c7] flex items-center justify-center shrink-0 border border-blue-100 mt-0.5">
-                        {item.category === 'Urgente' ? (
-                          <AlertCircle className="w-4 h-4 text-rose-600" />
-                        ) : item.category === 'Institucional' ? (
-                          <Shield className="w-4 h-4 text-[#0284c7]" />
-                        ) : item.category === 'Capacitación' ? (
-                          <GraduationCap className="w-4 h-4 text-[#0284c7]" />
-                        ) : (
-                          <FileText className="w-4 h-4 text-[#0284c7]" />
-                        )}
-                      </div>
-                      <div className="space-y-0.5">
-                        <div className="text-[10px] font-bold uppercase tracking-wider text-[#0284c7]">
-                          {item.category} <span className="text-slate-400 font-normal lowercase">• {item.date}</span>
-                        </div>
-                        <h4
-                          onClick={() => setSelectedNews(item)}
-                          className="text-xs sm:text-sm font-bold text-[#001428] hover:text-[#0284c7] cursor-pointer leading-tight transition-colors"
-                        >
-                          {item.title}
-                        </h4>
-                        <p className="text-[11px] text-slate-600 line-clamp-1 leading-normal">
-                          {item.summary}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        onClick={() => setSelectedNews(item)}
-                        className="text-slate-400 hover:text-slate-700 p-1.5 rounded-md hover:bg-slate-50 transition-colors cursor-pointer"
-                        title="Leer noticia completa"
-                      >
-                        <Eye className="w-4 h-4" />
-                      </button>
-                      {isAdmin && (onSaveNews || onDeleteNews) && (
-                        <NewsAdminActions
-                          onEdit={() => setEditingNews(item)}
-                          onDelete={() => setNewsToDelete(item)}
-                        />
-                      )}
-                    </div>
+                {sortedNews.length > NEWS_HOME_LIMIT_SAME_WEEK && (
+                  <div className="pt-2 text-center border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setShowAllNews((prev) => !prev)}
+                      className="inline-flex items-center gap-1.5 text-xs text-[#0284c7] hover:text-[#002d5a] font-semibold transition-colors cursor-pointer py-1.5 px-3 rounded-lg hover:bg-slate-50 border border-slate-200"
+                    >
+                      <span>{showAllNews ? 'Mostrar menos comunicados' : `Ver todos los comunicados (${sortedNews.length})`}</span>
+                      <ChevronRight className={`w-3.5 h-3.5 transition-transform ${showAllNews ? '-rotate-90' : 'rotate-90'}`} />
+                    </button>
                   </div>
-                );
-              })}
-            </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

@@ -365,6 +365,9 @@ export function getActivities(): ActivityItem[] {
 export function saveActivity(activity: ActivityItem): ActivityItem[] {
   const updated = upsertById(getActivities(), activity, 'start');
   safeSet(STORAGE_KEYS.ACTIVITIES, updated);
+  void pushSingleDoc('activities', activity.id, activity).catch((e) =>
+    console.error('Error guardando actividad en Firestore:', e)
+  );
   return updated;
 }
 
@@ -391,6 +394,9 @@ export function updateActivityStatus(
     statusUpdatedAt: new Date().toISOString(),
   };
   safeSet(STORAGE_KEYS.ACTIVITIES, updated);
+  void pushSingleDoc('activities', id, updated[exists]).catch((e) =>
+    console.error('Error actualizando estado de actividad en Firestore:', e)
+  );
   return updated;
 }
 
@@ -413,6 +419,18 @@ export function saveNews(newsItem: NewsItem): NewsItem[] {
 
   updatedList = upsertById(updatedList, newsItem, 'start');
   safeSet(STORAGE_KEYS.NEWS, updatedList);
+  void pushSingleDoc('news', newsItem.id, newsItem).catch((e) =>
+    console.error('Error guardando comunicado en Firestore:', e)
+  );
+
+  // Si se marcó como aviso interno, activar el banner institucional para que aparezca en portada
+  if (newsItem.isAnnouncement) {
+    const settings = getInstitutionalSettings();
+    if (!settings.isAnnouncementActive) {
+      saveInstitutionalSettings({ ...settings, isAnnouncementActive: true });
+    }
+  }
+
   return updatedList;
 }
 
@@ -423,6 +441,20 @@ export function setAnnouncementNewsId(newsId: string | null): NewsItem[] {
     isAnnouncement: newsId ? n.id === newsId : false,
   }));
   safeSet(STORAGE_KEYS.NEWS, updated);
+
+  if (newsId) {
+    const settings = getInstitutionalSettings();
+    if (!settings.isAnnouncementActive) {
+      saveInstitutionalSettings({ ...settings, isAnnouncementActive: true });
+    }
+    const target = updated.find((n) => n.id === newsId);
+    if (target) {
+      void pushSingleDoc('news', target.id, target).catch((e) =>
+        console.error('Error actualizando aviso interno en Firestore:', e)
+      );
+    }
+  }
+
   return updated;
 }
 
@@ -441,6 +473,9 @@ export function getCourses(): TrainingCourse[] {
 export function saveCourse(course: TrainingCourse): TrainingCourse[] {
   const updated = upsertById(getCourses(), course, 'start');
   safeSet(STORAGE_KEYS.COURSES, updated);
+  void pushSingleDoc('courses', course.id, course).catch((e) =>
+    console.error('Error guardando curso en Firestore:', e)
+  );
   return updated;
 }
 
@@ -459,6 +494,9 @@ export function getPrograms(): ProjectProgram[] {
 export function saveProgram(program: ProjectProgram): ProjectProgram[] {
   const updated = upsertById(getPrograms(), program, 'end');
   safeSet(STORAGE_KEYS.PROGRAMS, updated);
+  void pushSingleDoc('programs', program.id, program).catch((e) =>
+    console.error('Error guardando programa en Firestore:', e)
+  );
   return updated;
 }
 
@@ -491,6 +529,9 @@ export function getResources(): ResourceDocument[] {
 export function saveResource(resDoc: ResourceDocument): ResourceDocument[] {
   const updated = upsertById(getResources(), resDoc, 'start');
   safeSet(STORAGE_KEYS.RESOURCES, updated);
+  void pushSingleDoc('resources', resDoc.id, resDoc).catch((e) =>
+    console.error('Error guardando recurso en Firestore:', e)
+  );
   // If previously deleted, unmark it
   const deletedIds = safeGet<string[]>(STORAGE_KEYS.DELETED_RESOURCES, []);
   if (deletedIds.includes(resDoc.id)) {
@@ -522,6 +563,9 @@ export function getQuickLinks(): QuickLink[] {
 export function saveQuickLink(link: QuickLink): QuickLink[] {
   const updated = upsertById(getQuickLinks(), link, 'end');
   safeSet(STORAGE_KEYS.LINKS, updated);
+  void pushSingleDoc('links', link.id, link).catch((e) =>
+    console.error('Error guardando enlace en Firestore:', e)
+  );
   return updated;
 }
 
@@ -540,6 +584,9 @@ export function getTeam(): TeamMember[] {
 export function saveTeamMember(member: TeamMember): TeamMember[] {
   const updated = upsertById(getTeam(), member, 'end');
   safeSet(STORAGE_KEYS.TEAM, updated);
+  void pushSingleDoc('team', member.id, member).catch((e) =>
+    console.error('Error guardando integrante en Firestore:', e)
+  );
   return updated;
 }
 

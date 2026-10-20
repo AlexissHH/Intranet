@@ -1414,6 +1414,7 @@ export const initAuth = (
       };
       cachedUserProfile = profile;
       storeUserProfile(profile);
+      applySyncGate(true);
       if (onAuthSuccess) {
         onAuthSuccess(profile, cachedAccessToken);
       }

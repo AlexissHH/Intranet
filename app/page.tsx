@@ -646,6 +646,7 @@ export default function IntranetApp() {
     if (!checkAdminPermission('publicar novedades oficiales')) return;
     const updated = saveNews(newNews);
     setNews(updated);
+    setInstSettings(getInstitutionalSettings());
     showToast('success', 'Novedad publicada con éxito en la portada.');
   };
 
@@ -653,6 +654,7 @@ export default function IntranetApp() {
     if (!checkAdminPermission('publicar novedades oficiales')) return;
     const updated = setAnnouncementNewsId(newsId);
     setNews(updated);
+    setInstSettings(getInstitutionalSettings());
     showToast('success', newsId ? 'Comunicado asignado al Aviso Interno de portada.' : 'Aviso Interno desvinculado.');
   };
 

@@ -263,6 +263,26 @@ function docBytes(id: string, data: Record<string, unknown>): number {
 }
 
 /**
+ * Sanitiza un objeto antes de enviarlo a Firestore:
+ * 1. Remueve campos con valor `undefined` (Firestore rechaza con "Unsupported field value: undefined").
+ * 2. Elimina la propiedad interna `__id` para que no contamine los documentos remotos.
+ */
+export function sanitizeForFirestore<T>(data: T): Record<string, unknown> {
+  if (data === null || data === undefined) return {};
+  try {
+    const jsonStr = JSON.stringify(data, (key, value) => {
+      if (key === '__id') return undefined;
+      if (value === undefined) return undefined;
+      return value;
+    });
+    return JSON.parse(jsonStr) as Record<string, unknown>;
+  } catch (err) {
+    console.error('Error sanitizing data for Firestore:', err);
+    return (data as unknown as Record<string, unknown>) || {};
+  }
+}
+
+/**
  * Calcula el diff `items` y lo conocido en `tracker`, y lo aplica a Firestore:
  * crea/actualiza los cambiados y borra los que desaparecieron de la lista.
  * Devuelve true si todo pudo sincronizarse.
@@ -317,7 +337,7 @@ export async function pushCollectionDiff(
     for (let i = 0; i < ops.length; i += BATCH_MAX_OPS) {
       const batch = writeBatch(database);
       for (const op of ops.slice(i, i + BATCH_MAX_OPS)) {
-        if (op.type === 'set') batch.set(doc(database, name, op.id), op.data);
+        if (op.type === 'set') batch.set(doc(database, name, op.id), sanitizeForFirestore(op.data));
         else batch.delete(doc(database, name, op.id));
       }
       await batch.commit();
@@ -369,7 +389,7 @@ export async function replaceCollection(
       const id = idOf(item);
       if (!id || docBytes(id, item) > MAX_DOC_BYTES) continue;
       await commitIfNeeded();
-      batch.set(doc(database, name, id), item);
+      batch.set(doc(database, name, id), sanitizeForFirestore(item));
       ops++;
     }
     if (ops > 0) await batch.commit();
@@ -458,7 +478,7 @@ export async function pushSingleDoc(col: string, docId: string, value: unknown):
   if (!database) return;
   const key = `${col}/${docId}`;
   try {
-    await setDoc(doc(database, col, docId), value as Record<string, unknown>);
+    await setDoc(doc(database, col, docId), sanitizeForFirestore(value as Record<string, unknown>));
     clearPushFailure(key);
     cancelPushRetry(key);
     reportReady();
