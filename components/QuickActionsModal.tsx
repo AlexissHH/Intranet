@@ -148,7 +148,7 @@ export function QuickActionsModal({
   const { isExpanded, isDragging, dragBind, sheetStyle } = useBottomSheetDrag({ isOpen, onClose });
 
   const [visitSchool, setVisitSchool] = useState('');
-  const [visitLevel, setVisitLevel] = useState<string>('Secundario (4to año)');
+  const [visitLevel, setVisitLevel] = useState<string>('');
   const [customVisitLevel, setCustomVisitLevel] = useState<string>('');
   const [visitAttendees, setVisitAttendees] = useState<string>('');
   const [visitDate, setVisitDate] = useState(() => initialDate || getNextBusinessDayString());
@@ -248,7 +248,7 @@ const [visitContactEmail, setVisitContactEmail] = useState('');
         : visitLevel.trim()
     );
 
-    if (visitLevel === 'Otro (especificar...)' && !effectiveLevel) {
+    if (!effectiveLevel) {
       return;
     }
 
@@ -284,7 +284,7 @@ const [visitContactEmail, setVisitContactEmail] = useState('');
       setVisitContactEmail('');
       setVisitAttendees('');
       setCustomVisitLevel('');
-      setVisitLevel('Secundario (4to año)');
+      setVisitLevel('');
     } finally {
       setIsSubmitting(false);
     }
@@ -474,14 +474,16 @@ const [visitContactEmail, setVisitContactEmail] = useState('');
 
                 <div>
                   <label htmlFor="qa-field-2" className="block text-xs font-bold text-[#001428] mb-1">
-                    Nivel Educativo / Curso
+                    Nivel Educativo / Curso *
                   </label>
                   <select
                     id="qa-field-2"
+                    required
                     value={visitLevel}
                     onChange={(e) => setVisitLevel(e.target.value)}
                     className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none bg-white font-medium text-[#001428]"
                   >
+                    <option value="" disabled>Seleccionar nivel educativo / curso...</option>
                     {VISIT_LEVEL_OPTIONS.map((opt) => (
                       <option key={opt} value={opt}>
                         {opt}

@@ -28,7 +28,10 @@ import {
   Mail,
   Star,
   Trash2,
+  Edit2,
 } from 'lucide-react';
+import { VISIT_LEVEL_OPTIONS } from './QuickActionsModal';
+import { EditVisitModalForm } from './AdminSection';
 import { ActivityItem, ResourceDocument } from '@/lib/mock-data';
 import {
   buildCsatSurveyUrl,
@@ -171,6 +174,7 @@ export function AgendaSection({
     return new Date(year, month, day, 12, 0, 0, 0);
   });
   const [selectedActivity, setSelectedActivity] = useState<ActivityItem | null>(null);
+  const [editingVisit, setEditingVisit] = useState<ActivityItem | null>(null);
   const [csatEmailInput, setCsatEmailInput] = useState('');
   const [csurveyEmailError, setCsurveyEmailError] = useState<string | null>(null);
   /** Prompt CSAT: visita de HOY que terminó (hora de fin pasada, estado confirmada)
@@ -2848,6 +2852,17 @@ export function AgendaSection({
               >
                 Cerrar
               </button>
+              {isAdmin && onUpdateActivityFull && selectedActivity.type === 'visita' && (
+                <button
+                  type="button"
+                  onClick={() => setEditingVisit(selectedActivity)}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-2.5 bg-sky-50 hover:bg-sky-100 text-[#0284c7] rounded-lg text-xs font-bold cursor-pointer transition-colors border border-sky-200 shadow-2xs"
+                  title="Editar datos de la visita escolar"
+                >
+                  <Edit2 className="w-3.5 h-3.5" />
+                  <span>Editar Visita</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => downloadActivitySheetPdf(selectedActivity)}
@@ -2873,6 +2888,19 @@ export function AgendaSection({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Modal para editar visita escolar directamente desde la Agenda */}
+      {editingVisit && (
+        <EditVisitModalForm
+          visit={editingVisit}
+          onClose={() => setEditingVisit(null)}
+          onSave={(updated) => {
+            onUpdateActivityFull?.(updated);
+            setSelectedActivity(updated);
+            setEditingVisit(null);
+          }}
+        />
       )}
 
       {csatAutoPrompt && (

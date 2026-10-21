@@ -2878,7 +2878,7 @@ export function AdminSection({
 }
 
 // Subcomponent for Editing Visit (school name, educational level/course, date, time, attendees, etc.)
-function EditVisitModalForm({
+export function EditVisitModalForm({
   visit,
   onClose,
   onSave,
