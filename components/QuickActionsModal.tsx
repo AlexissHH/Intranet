@@ -121,6 +121,20 @@ function CalendarSyncToggle({
   );
 }
 
+export const VISIT_LEVEL_OPTIONS = [
+  'Primario (1° a 3° grado)',
+  'Primario (4° a 6° grado)',
+  'Secundario (Ciclo Básico - 1° a 3° año)',
+  'Secundario (4to año)',
+  'Secundario (5to año)',
+  'Secundario (4to y 5to año)',
+  'Secundario (6to año / Técnico)',
+  'Terciario / Universitario',
+  'Educación Especial',
+  'Comunidad / Tercera Edad',
+  'Otro (especificar...)',
+] as const;
+
 export function QuickActionsModal({
   isOpen,
   onClose,
@@ -134,7 +148,8 @@ export function QuickActionsModal({
   const { isExpanded, isDragging, dragBind, sheetStyle } = useBottomSheetDrag({ isOpen, onClose });
 
   const [visitSchool, setVisitSchool] = useState('');
-  const [visitLevel, setVisitLevel] = useState('Secundario (4to año)');
+  const [visitLevel, setVisitLevel] = useState<string>('Secundario (4to año)');
+  const [customVisitLevel, setCustomVisitLevel] = useState<string>('');
   const [visitAttendees, setVisitAttendees] = useState<string>('');
   const [visitDate, setVisitDate] = useState(() => initialDate || getNextBusinessDayString());
   const [visitStartTime, setVisitStartTime] = useState('10:00');
@@ -227,12 +242,22 @@ const [visitContactEmail, setVisitContactEmail] = useState('');
       return;
     }
 
+    const effectiveLevel = (
+      visitLevel === 'Otro (especificar...)'
+        ? customVisitLevel.trim()
+        : visitLevel.trim()
+    );
+
+    if (visitLevel === 'Otro (especificar...)' && !effectiveLevel) {
+      return;
+    }
+
     try {
       setIsSubmitting(true);
       const visitCount = parseAttendees(visitAttendees);
       const newVisit: ActivityItem = {
         id: 'visita-' + Date.now(),
-        title: `Visita Escolar: ${visitSchool} (${visitLevel})`,
+        title: effectiveLevel ? `Visita Escolar: ${visitSchool.trim()} (${effectiveLevel})` : `Visita Escolar: ${visitSchool.trim()}`,
         type: 'visita',
         date: visitDate,
         startTime: visitStartTime,
@@ -241,8 +266,8 @@ const [visitContactEmail, setVisitContactEmail] = useState('');
         responsible: visitResponsible.trim() || 'Coordinación del Instituto',
         // Sin dato = sin cifra: antes se registraban 30 alumnos inventados.
         attendeesCount: visitCount,
-        institution: visitSchool,
-        level: visitLevel,
+        institution: visitSchool.trim(),
+        level: effectiveLevel || undefined,
         // Email de contacto de la institución: destinatario de la encuesta de satisfacción.
         contactEmail: visitContactEmail.trim() || undefined,
         description: `Visita guiada institucional del programa "Conociendo el Poder Legislativo".${
@@ -257,6 +282,9 @@ const [visitContactEmail, setVisitContactEmail] = useState('');
       setVisitSchool('');
       setVisitNotes('');
       setVisitContactEmail('');
+      setVisitAttendees('');
+      setCustomVisitLevel('');
+      setVisitLevel('Secundario (4to año)');
     } finally {
       setIsSubmitting(false);
     }
@@ -448,18 +476,32 @@ const [visitContactEmail, setVisitContactEmail] = useState('');
                   <label htmlFor="qa-field-2" className="block text-xs font-bold text-[#001428] mb-1">
                     Nivel Educativo / Curso
                   </label>
-                  <select id="qa-field-2"
+                  <select
+                    id="qa-field-2"
                     value={visitLevel}
                     onChange={(e) => setVisitLevel(e.target.value)}
-                    className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none bg-white"
+                    className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none bg-white font-medium text-[#001428]"
                   >
-                    <option value="Primario (5to y 6to grado)">Primario (5to y 6to grado)</option>
-                    <option value="Secundario (Ciclo Básico)">Secundario (Ciclo Básico)</option>
-                    <option value="Secundario (4to y 5to año)">Secundario (4to y 5to año)</option>
-                    <option value="Terciario / Universitario">Terciario / Universitario</option>
-                    <option value="Educación Especial">Educación Especial</option>
-                    <option value="Comunidad / Tercera Edad">Comunidad / Tercera Edad</option>
+                    {VISIT_LEVEL_OPTIONS.map((opt) => (
+                      <option key={opt} value={opt}>
+                        {opt}
+                      </option>
+                    ))}
                   </select>
+
+                  {visitLevel === 'Otro (especificar...)' && (
+                    <div className="mt-2 animate-in fade-in duration-150">
+                      <input
+                        type="text"
+                        required
+                        value={customVisitLevel}
+                        onChange={(e) => setCustomVisitLevel(e.target.value)}
+                        placeholder="Escribe el curso o nivel específico (ej: 3er grado, 6to año electromecánica...)"
+                        className="w-full text-xs p-2 rounded border border-[#0284c7] focus:ring-2 focus:ring-[#0284c7]/30 focus:outline-none bg-sky-50/50 font-medium text-[#001428]"
+                        autoFocus
+                      />
+                    </div>
+                  )}
                 </div>
 
                 <div>

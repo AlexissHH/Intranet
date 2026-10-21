@@ -81,6 +81,7 @@ import {
 import { Reorder, useDragControls } from 'motion/react';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
+import { VISIT_LEVEL_OPTIONS } from './QuickActionsModal';
 import {
   getAuthorizedUsers,
   getApprovalMode,
@@ -333,6 +334,7 @@ export function AdminSection({
   const [visitFilter, setVisitFilter] = useState<'todas' | 'pendiente' | 'confirmada' | 'cancelada'>('todas');
   const [visitSearch, setVisitSearch] = useState('');
   const [cancellingVisit, setCancellingVisit] = useState<ActivityItem | null>(null);
+  const [editingVisit, setEditingVisit] = useState<ActivityItem | null>(null);
   const [cancellationReasonInput, setCancellationReasonInput] = useState('');
   /** Visita cancelada pendiente de eliminación definitiva (confirmación previa). */
   const [visitToDelete, setVisitToDelete] = useState<ActivityItem | null>(null);
@@ -1094,6 +1096,16 @@ export function AdminSection({
                               </button>
                             )}
 
+                            <button
+                              type="button"
+                              onClick={() => setEditingVisit(visit)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors cursor-pointer border border-slate-200 shadow-2xs"
+                              title="Editar datos de la visita"
+                            >
+                              <Edit2 className="w-3.5 h-3.5 text-[#0284c7]" />
+                              <span>Editar</span>
+                            </button>
+
                             {onSyncEventToCalendar && (
                               <button
                                 type="button"
@@ -1114,6 +1126,7 @@ export function AdminSection({
                             <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                             <span className="truncate">
                               <strong>Inst:</strong> {visit.institution || 'Colegio / Escuela'}
+                              {visit.level ? ` • ${visit.level}` : ''}
                             </span>
                           </div>
                           <div className="flex items-center gap-1.5">
@@ -2847,6 +2860,241 @@ export function AdminSection({
         }}
         onCancel={() => setVisitToDelete(null)}
       />
+
+      {/* Modal para editar visita escolar */}
+      {editingVisit && (
+        <EditVisitModalForm
+          visit={editingVisit}
+          onClose={() => setEditingVisit(null)}
+          onSave={(updated) => {
+            saveActivity(updated);
+            setSuccessMessage(`Visita de "${updated.institution || updated.title}" actualizada correctamente.`);
+            setTimeout(() => setSuccessMessage(null), 4000);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Subcomponent for Editing Visit (school name, educational level/course, date, time, attendees, etc.)
+function EditVisitModalForm({
+  visit,
+  onClose,
+  onSave,
+}: {
+  visit: ActivityItem;
+  onClose: () => void;
+  onSave: (updated: ActivityItem) => void;
+}) {
+  const [school, setSchool] = useState(visit.institution || '');
+  const isExistingInPresets = VISIT_LEVEL_OPTIONS.some((opt) => opt !== 'Otro (especificar...)' && opt === visit.level);
+  const [levelPreset, setLevelPreset] = useState<string>(
+    isExistingInPresets ? (visit.level || 'Secundario (4to año)') : (visit.level ? 'Otro (especificar...)' : 'Secundario (4to año)')
+  );
+  const [customLevel, setCustomLevel] = useState<string>(isExistingInPresets ? '' : (visit.level || ''));
+  const [date, setDate] = useState(visit.date);
+  const [startTime, setStartTime] = useState(visit.startTime);
+  const [endTime, setEndTime] = useState(visit.endTime);
+  const [attendees, setAttendees] = useState(visit.attendeesCount ? String(visit.attendeesCount) : '');
+  const [responsible, setResponsible] = useState(visit.responsible || '');
+  const [location, setLocation] = useState(visit.location || 'Recinto de Sesiones y Salón de Pasos Perdidos');
+  const [contactEmail, setContactEmail] = useState(visit.contactEmail || '');
+  const [notes, setNotes] = useState(visit.notes || '');
+
+  const handleSave = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!school.trim()) return;
+
+    const effectiveLevel = levelPreset === 'Otro (especificar...)' ? customLevel.trim() : levelPreset.trim();
+    if (levelPreset === 'Otro (especificar...)' && !effectiveLevel) return;
+
+    const parsedCount = parseInt(attendees, 10);
+    const validCount = !isNaN(parsedCount) && parsedCount > 0 ? parsedCount : undefined;
+
+    const updated: ActivityItem = {
+      ...visit,
+      institution: school.trim(),
+      level: effectiveLevel || undefined,
+      title: effectiveLevel ? `Visita Escolar: ${school.trim()} (${effectiveLevel})` : `Visita Escolar: ${school.trim()}`,
+      date,
+      startTime,
+      endTime,
+      attendeesCount: validCount,
+      responsible: responsible.trim() || 'Coordinación del Instituto',
+      location: location.trim(),
+      contactEmail: contactEmail.trim() || undefined,
+      notes: notes.trim() || undefined,
+      description: `Visita guiada institucional del programa "Conociendo el Poder Legislativo".${
+        validCount ? ` Contingente de ${validCount} participantes.` : ''
+      }`,
+    };
+
+    onSave(updated);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 animate-in fade-in overflow-y-auto">
+      <div className="bg-white rounded-2xl max-w-lg w-full p-5 sm:p-6 shadow-2xl border border-slate-200 space-y-4 my-8">
+        <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+          <div className="flex items-center gap-2">
+            <Edit2 className="w-5 h-5 text-[#0284c7]" />
+            <h3 className="text-sm sm:text-base font-extrabold text-[#001428]">
+              Editar Visita Escolar
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-700 cursor-pointer"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSave} className="space-y-3.5">
+          <div>
+            <label className="block text-xs font-bold text-[#001428] mb-1">
+              Institución Educativa / Escuela *
+            </label>
+            <input
+              type="text"
+              required
+              value={school}
+              onChange={(e) => setSchool(e.target.value)}
+              placeholder="Ej: Colegio Nacional N° 1"
+              className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-[#001428] mb-1">
+              Nivel Educativo / Curso *
+            </label>
+            <select
+              value={levelPreset}
+              onChange={(e) => setLevelPreset(e.target.value)}
+              className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none bg-white font-medium text-[#001428]"
+            >
+              {VISIT_LEVEL_OPTIONS.map((opt) => (
+                <option key={opt} value={opt}>
+                  {opt}
+                </option>
+              ))}
+            </select>
+            {levelPreset === 'Otro (especificar...)' && (
+              <div className="mt-2 animate-in fade-in duration-150">
+                <input
+                  type="text"
+                  required
+                  value={customLevel}
+                  onChange={(e) => setCustomLevel(e.target.value)}
+                  placeholder="Escribe el curso o nivel específico (ej: Primario 3er grado, 6to año electromecánica...)"
+                  className="w-full text-xs p-2.5 rounded-lg border border-[#0284c7] focus:ring-2 focus:ring-[#0284c7]/30 focus:outline-none bg-sky-50/50 font-medium text-[#001428]"
+                  autoFocus
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-[#001428] mb-1">Fecha *</label>
+              <input
+                type="date"
+                required
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-[#001428] mb-1">Hora inicio *</label>
+              <input
+                type="time"
+                required
+                value={startTime}
+                onChange={(e) => setStartTime(e.target.value)}
+                className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-[#001428] mb-1">Hora fin *</label>
+              <input
+                type="time"
+                required
+                value={endTime}
+                onChange={(e) => setEndTime(e.target.value)}
+                className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-[#001428] mb-1">Cantidad de Alumnos</label>
+              <input
+                type="number"
+                min="1"
+                max="250"
+                value={attendees}
+                onChange={(e) => setAttendees(e.target.value)}
+                placeholder="A confirmar"
+                className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-[#001428] mb-1">Guía / Responsable</label>
+              <input
+                type="text"
+                value={responsible}
+                onChange={(e) => setResponsible(e.target.value)}
+                placeholder="Coordinación del Instituto"
+                className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-[#001428] mb-1">Email de contacto institución</label>
+            <input
+              type="email"
+              value={contactEmail}
+              onChange={(e) => setContactEmail(e.target.value)}
+              placeholder="director@escuela.edu.ar"
+              className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-[#001428] mb-1">Notas logísticas</label>
+            <textarea
+              rows={2}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Detalles sobre micros, accesibilidad, etc."
+              className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none resize-none font-medium"
+            />
+          </div>
+
+          <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 rounded-lg border border-slate-300 text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-2 rounded-lg bg-[#001428] hover:bg-[#122a45] text-white text-xs font-bold transition-colors cursor-pointer shadow-xs"
+            >
+              Guardar Cambios
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
