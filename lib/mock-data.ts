@@ -17,6 +17,8 @@ export interface ActivityItem {
   notes?: string;
   /** Email de contacto de la institución (destinatario de la encuesta CSAT). */
   contactEmail?: string;
+  /** Teléfono o celular de contacto de la institución / docente. */
+  contactPhone?: string;
   cancellationReason?: string;
   statusUpdatedAt?: string;
   /** Encuesta CSAT de satisfacción de la visita: token y fecha del último envío. */

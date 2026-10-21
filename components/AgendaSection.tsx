@@ -2827,6 +2827,20 @@ export function AgendaSection({
                     </span>
                   </div>
                 )}
+                {selectedActivity.contactPhone && (
+                  <div className="flex items-center gap-2 text-slate-700">
+                    <Phone className="w-3.5 h-3.5 text-[#0284c7] shrink-0" />
+                    <span>
+                      <strong>Teléfono de contacto:</strong>{' '}
+                      <a
+                        href={`tel:${selectedActivity.contactPhone.replace(/\s+/g, '')}`}
+                        className="text-[#0284c7] hover:underline"
+                      >
+                        {selectedActivity.contactPhone}
+                      </a>
+                    </span>
+                  </div>
+                )}
                 {selectedActivity.notes && (
                   <div className="text-[11px] text-slate-600 pt-1 border-t border-slate-200">
                     <strong>Notas logísticas:</strong> {selectedActivity.notes}

@@ -156,7 +156,8 @@ export function QuickActionsModal({
   const [visitEndTime, setVisitEndTime] = useState('11:45');
   const [visitResponsible, setVisitResponsible] = useState('');
   const [visitLocation, setVisitLocation] = useState('Recinto de Sesiones y Salón de Pasos Perdidos');
-const [visitContactEmail, setVisitContactEmail] = useState('');
+  const [visitContactEmail, setVisitContactEmail] = useState('');
+  const [visitContactPhone, setVisitContactPhone] = useState('');
   const [visitNotes, setVisitNotes] = useState('');
   const [syncWithGoogleCalendar, setSyncWithGoogleCalendar] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -270,6 +271,7 @@ const [visitContactEmail, setVisitContactEmail] = useState('');
         level: effectiveLevel || undefined,
         // Email de contacto de la institución: destinatario de la encuesta de satisfacción.
         contactEmail: visitContactEmail.trim() || undefined,
+        contactPhone: visitContactPhone.trim() || undefined,
         description: `Visita guiada institucional del programa "Conociendo el Poder Legislativo".${
           visitCount ? ` Contingente de ${visitCount} participantes.` : ''
         }`,
@@ -282,6 +284,7 @@ const [visitContactEmail, setVisitContactEmail] = useState('');
       setVisitSchool('');
       setVisitNotes('');
       setVisitContactEmail('');
+      setVisitContactPhone('');
       setVisitAttendees('');
       setCustomVisitLevel('');
       setVisitLevel('');
@@ -620,15 +623,28 @@ const [visitContactEmail, setVisitContactEmail] = useState('');
                   />
                 </div>
 
-                <div className="sm:col-span-2">
+                <div>
                   <label htmlFor="qa-field-9" className="block text-xs font-bold text-[#001428] mb-1">
-                    Email de contacto de la institución <span className="text-slate-400 font-normal">(para la encuesta de satisfacción)</span>
+                    Email de contacto <span className="text-slate-400 font-normal">(encuesta CSAT)</span>
                   </label>
                   <input id="qa-field-9"
                     type="email"
                     value={visitContactEmail}
                     onChange={(e) => setVisitContactEmail(e.target.value)}
                     placeholder="Ej: direccion@colegio.edu.ar"
+                    className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="qa-field-10" className="block text-xs font-bold text-[#001428] mb-1">
+                    Número de contacto <span className="text-slate-400 font-normal">(teléfono / WhatsApp)</span>
+                  </label>
+                  <input id="qa-field-10"
+                    type="tel"
+                    value={visitContactPhone}
+                    onChange={(e) => setVisitContactPhone(e.target.value)}
+                    placeholder="Ej: +54 9 11 4022-XXXX / 3794-XXXXXX"
                     className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
                   />
                 </div>

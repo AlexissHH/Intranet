@@ -393,6 +393,8 @@ export function downloadActivitySheetPdf(activity: ActivityItem) {
     { label: 'Institución / Sector', val: activity.institution || LEGISLATURE_NAME },
     { label: 'Nivel / Modalidad', val: activity.level || 'Personal Legislativo / Institucional' },
     { label: 'Estado de la Reserva', val: statusLabel(activity.status) },
+    ...(activity.contactEmail ? [{ label: 'Email de Contacto', val: activity.contactEmail }] : []),
+    ...(activity.contactPhone ? [{ label: 'Teléfono de Contacto', val: activity.contactPhone }] : []),
   ];
 
   doc.setFont('helvetica', 'bold');

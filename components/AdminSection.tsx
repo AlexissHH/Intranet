@@ -1143,6 +1143,25 @@ export function AdminSection({
                           </div>
                         </div>
 
+                        {(visit.contactPhone || visit.contactEmail) && (
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-600 bg-sky-50/60 px-2.5 py-1.5 rounded-md border border-sky-100">
+                            {visit.contactPhone && (
+                              <div className="flex items-center gap-1.5 font-medium text-slate-700">
+                                <Phone className="w-3.5 h-3.5 text-[#0284c7] shrink-0" />
+                                <span><strong>Contacto:</strong> {visit.contactPhone}</span>
+                              </div>
+                            )}
+                            {visit.contactPhone && visit.contactEmail && (
+                              <span className="text-slate-300 hidden sm:inline">•</span>
+                            )}
+                            {visit.contactEmail && (
+                              <div className="flex items-center gap-1.5 text-slate-600">
+                                <span><strong>Email:</strong> {visit.contactEmail}</span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                         {visit.notes && (
                           <div className="text-[11px] text-slate-600 bg-white/70 p-2 rounded border border-slate-200">
                             <strong>Notas / Docente:</strong> {visit.notes}
@@ -2900,6 +2919,7 @@ export function EditVisitModalForm({
   const [responsible, setResponsible] = useState(visit.responsible || '');
   const [location, setLocation] = useState(visit.location || 'Recinto de Sesiones y Salón de Pasos Perdidos');
   const [contactEmail, setContactEmail] = useState(visit.contactEmail || '');
+  const [contactPhone, setContactPhone] = useState(visit.contactPhone || '');
   const [notes, setNotes] = useState(visit.notes || '');
 
   const handleSave = (e: React.FormEvent) => {
@@ -2924,6 +2944,7 @@ export function EditVisitModalForm({
       responsible: responsible.trim() || 'Coordinación del Instituto',
       location: location.trim(),
       contactEmail: contactEmail.trim() || undefined,
+      contactPhone: contactPhone.trim() || undefined,
       notes: notes.trim() || undefined,
       description: `Visita guiada institucional del programa "Conociendo el Poder Legislativo".${
         validCount ? ` Contingente de ${validCount} participantes.` : ''
@@ -3056,15 +3077,27 @@ export function EditVisitModalForm({
             </div>
           </div>
 
-          <div>
-            <label className="block text-xs font-bold text-[#001428] mb-1">Email de contacto institución</label>
-            <input
-              type="email"
-              value={contactEmail}
-              onChange={(e) => setContactEmail(e.target.value)}
-              placeholder="director@escuela.edu.ar"
-              className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
-            />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-[#001428] mb-1">Email de contacto institución</label>
+              <input
+                type="email"
+                value={contactEmail}
+                onChange={(e) => setContactEmail(e.target.value)}
+                placeholder="director@escuela.edu.ar"
+                className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-[#001428] mb-1">Número de contacto (teléfono / cel)</label>
+              <input
+                type="tel"
+                value={contactPhone}
+                onChange={(e) => setContactPhone(e.target.value)}
+                placeholder="Ej: +54 9 11 4022-XXXX"
+                className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
+              />
+            </div>
           </div>
 
           <div>
