@@ -241,6 +241,7 @@ export function HomeSection({
       visitasPorRealizarCount: visits.porRealizar,
       visitasPendientesCount: visits.pendientes,
       alumnosRecibidos: visits.alumnosRecibidos,
+      alumnosEstimados: visits.alumnosEstimados,
       visitasSinAsistencia: visits.sinAsistenciaCargada,
       satisfaccionPct,
       objetivoPct,
@@ -283,12 +284,10 @@ export function HomeSection({
     return { mondayYmd: toYmd(monday), sundayYmd: toYmd(sunday) };
   }, []);
 
-  // El aviso interno toma estrictamente el comunicado asignado por el admin (isAnnouncement === true)
-  // o en su defecto el primer comunicado relevante si está activo en Datos Institucionales.
-  const activeAnnouncementNews = news.find((n) => n.isAnnouncement) || news.find((n) => n.pinned) || news[0];
-  const shouldShowInternalNotice =
-    (instSettings.isAnnouncementActive || Boolean(activeAnnouncementNews?.isAnnouncement)) &&
-    Boolean(activeAnnouncementNews);
+  // El aviso interno toma estrictamente el comunicado que Administración asignó (isAnnouncement === true);
+  // sin comunicado asignado no se muestra nada. El interruptor de Datos Institucionales lo pausa o lo reactiva.
+  const activeAnnouncementNews = news.find((n) => n.isAnnouncement);
+  const shouldShowInternalNotice = Boolean(instSettings.isAnnouncementActive) && Boolean(activeAnnouncementNews);
 
   const sortedNews = React.useMemo(() => {
     return [...news].sort((a, b) => {
@@ -901,9 +900,11 @@ export function HomeSection({
                   {metrics.visitasSinAsistencia > 0 ? (
                     <span
                       className="text-amber-300"
-                      title="Visitas realizadas a las que todavía no se les cargó la asistencia real (se carga al editar la visita)."
+                      title="Visitas realizadas a las que todavía no se les cargó la asistencia real (se carga al editar la visita). En ellas se suma la cantidad estimada al agendar."
                     >
-                      {' '}• {metrics.visitasSinAsistencia} sin asistencia cargada
+                      {' '}• {metrics.alumnosEstimados > 0
+                        ? `${metrics.alumnosEstimados.toLocaleString('es-AR')} estimados`
+                        : `${metrics.visitasSinAsistencia} sin asistencia cargada`}
                     </span>
                   ) : null}
                 </div>
@@ -961,7 +962,7 @@ export function HomeSection({
                 <div className="flex items-center justify-between text-[10px] text-slate-400">
                   <span>
                     {metrics.isShowingVisitas
-                      ? `${metrics.visitasRealizadasCount} visitas realizadas • ${metrics.alumnosRecibidos.toLocaleString('es-AR')} alumnos recibidos`
+                      ? `${metrics.visitasRealizadasCount} visitas realizadas • ${metrics.alumnosRecibidos.toLocaleString('es-AR')} alumnos recibidos${metrics.alumnosEstimados > 0 ? ' (incluye estimados)' : ''}`
                       : `${metrics.agentesFormados.toLocaleString('es-AR')} agentes formados (curso completo + reseña CSAT) ${metrics.isMensual ? 'en el mes' : 'en el año'}`}
                   </span>
                   {metrics.isShowingVisitas && metrics.visitasPendientesCount > 0 ? (

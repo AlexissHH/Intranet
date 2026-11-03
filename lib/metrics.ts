@@ -16,9 +16,10 @@
  *    para "agentes formados".
  *  - VISITA REALIZADA: visita de la agenda ya finalizada (estado efectivo `finalizada`). Las
  *    pendientes, canceladas, futuras o en curso no cuentan como realizadas.
- *  - ALUMNOS RECIBIDOS: solo la asistencia REAL (`attendeesActual`) cargada por Administración
- *    en visitas realizadas. La cantidad del agendado (`attendeesCount`) es una estimación y
- *    no se suma; las visitas realizadas sin asistencia cargada se informan aparte.
+ *  - ALUMNOS RECIBIDOS: en cada visita realizada se suma la asistencia REAL (`attendeesActual`)
+ *    si Administración ya la cargó; si todavía no, se suma la cantidad cargada al agendar
+ *    (`attendeesCount`), que es una ESTIMACIÓN. La parte estimada se informa aparte
+ *    (`alumnosEstimados`) para que nunca se presente como asistencia confirmada.
  *  - Los registros de ejemplo (`isSample`) nunca cuentan.
  */
 import type { ActivityItem, AgentCourseAudit, TrainingResult } from './mock-data';
@@ -98,10 +99,18 @@ export interface VisitMetrics {
   porRealizar: number;
   pendientes: number;
   canceladas: number;
-  /** Suma de la asistencia REAL cargada en las visitas realizadas. */
+  /** Alumnos de las visitas realizadas: asistencia real y, donde falta, la cantidad estimada al agendar. */
   alumnosRecibidos: number;
+  /** Parte de `alumnosRecibidos` que es estimada (visitas realizadas sin asistencia real cargada). */
+  alumnosEstimados: number;
   /** Visitas realizadas a las que todavía no se les cargó la asistencia real. */
   sinAsistenciaCargada: number;
+}
+
+/** Cantidad estimada de asistentes cargada al agendar, o `undefined` si no hay una válida. */
+export function getEstimatedAttendees(act: ActivityItem): number | undefined {
+  const n = act.attendeesCount;
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
 }
 
 /** Asistencia real de una actividad, o `undefined` si todavía no fue cargada. */
@@ -122,6 +131,7 @@ export function computeVisitMetrics(
     pendientes: 0,
     canceladas: 0,
     alumnosRecibidos: 0,
+    alumnosEstimados: 0,
     sinAsistenciaCargada: 0,
   };
   for (const act of activities) {
@@ -130,8 +140,14 @@ export function computeVisitMetrics(
     if (status === 'finalizada') {
       result.realizadas += 1;
       const actual = getActualAttendees(act);
-      if (actual === undefined) result.sinAsistenciaCargada += 1;
-      else result.alumnosRecibidos += actual;
+      if (actual !== undefined) {
+        result.alumnosRecibidos += actual;
+      } else {
+        result.sinAsistenciaCargada += 1;
+        const estimado = getEstimatedAttendees(act) ?? 0;
+        result.alumnosRecibidos += estimado;
+        result.alumnosEstimados += estimado;
+      }
     } else if (status === 'confirmada' || status === 'en_curso') {
       result.porRealizar += 1;
     } else if (status === 'pendiente') {
