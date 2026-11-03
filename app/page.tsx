@@ -40,6 +40,7 @@ import {
   saveCourse,
   getPrograms,
   saveProgram,
+  deleteProgram,
   getResources,
   saveResource,
   deleteResource,
@@ -530,7 +531,7 @@ export default function IntranetApp() {
           const newSheet = await createGoogleSheet(token!, `Instituto de Capacitación - Agenda ${today}`);
           const spreadsheetId = newSheet.spreadsheetId;
 
-          const headerRow = ['ID', 'Fecha', 'Inicio', 'Fin', 'Tipo', 'Título', 'Ubicación', 'Responsable', 'Asistentes', 'Estado'];
+          const headerRow = ['ID', 'Fecha', 'Inicio', 'Fin', 'Tipo', 'Título', 'Ubicación', 'Responsable', 'Asistentes estimados', 'Estado', 'Asistentes reales'];
           const dataRows = activities.map((act) => [
             act.id,
             act.date,
@@ -542,6 +543,7 @@ export default function IntranetApp() {
             act.responsible,
             act.attendeesCount || '',
             act.status,
+            act.attendeesActual ?? '',
           ]);
 
           await appendRowsToSheet(token!, {
@@ -666,10 +668,18 @@ export default function IntranetApp() {
   };
 
   const handleSaveProgram = (newProg: ProjectProgram) => {
-    if (!checkAdminPermission('incorporar nuevos programas institucionales')) return;
+    if (!checkAdminPermission('incorporar o modificar programas institucionales')) return;
+    const isEditing = programs.some((p) => p.id === newProg.id);
     const updated = saveProgram(newProg);
     setPrograms(updated);
-    showToast('success', 'Programa incorporado correctamente.');
+    showToast('success', isEditing ? 'Programa actualizado correctamente.' : 'Programa incorporado correctamente.');
+  };
+
+  const handleDeleteProgram = (id: string) => {
+    if (!checkAdminPermission('eliminar programas institucionales')) return;
+    const updated = deleteProgram(id);
+    setPrograms(updated);
+    showToast('success', 'Programa eliminado.');
   };
 
   const handleSaveResource = (newRes: ResourceDocument) => {
@@ -971,6 +981,7 @@ export default function IntranetApp() {
             <ProgramsSection
               programs={programs}
               onSaveProgram={handleSaveProgram}
+              onDeleteProgram={handleDeleteProgram}
               onOpenEmailTo={handleOpenEmailTo}
               isAdmin={user?.role === 'administrador'}
             />
@@ -1146,14 +1157,18 @@ export default function IntranetApp() {
                 Soporte y Accesos
               </div>
               <ul className="space-y-2 text-xs text-slate-500">
-                <li className="flex items-center justify-between">
-                  <span>Mesa de Entradas:</span>
-                  <span className="font-semibold text-slate-700">{instSettings.receptionExtension || 'int. 4022'}</span>
-                </li>
-                <li className="flex items-center justify-between">
-                  <span>Soporte Informático:</span>
-                  <span className="font-semibold text-slate-700">{instSettings.techSupportExtension || 'int. 4108'}</span>
-                </li>
+                {instSettings.receptionExtension && (
+                  <li className="flex items-center justify-between">
+                    <span>Mesa de Entradas:</span>
+                    <span className="font-semibold text-slate-700">{instSettings.receptionExtension}</span>
+                  </li>
+                )}
+                {instSettings.techSupportExtension && (
+                  <li className="flex items-center justify-between">
+                    <span>Soporte Informático:</span>
+                    <span className="font-semibold text-slate-700">{instSettings.techSupportExtension}</span>
+                  </li>
+                )}
                 <li>
                   <button
                     onClick={() => setActiveTab('recursos')}
@@ -1202,7 +1217,7 @@ export default function IntranetApp() {
                 Ubicación y Contacto
               </div>
               <div className="space-y-1.5 text-xs text-slate-500 leading-relaxed">
-                <p className="font-medium text-slate-700">{instSettings.address || 'Palacio Legislativo - Anexo Rivadavia, Av. Rivadavia 1864, Piso 3°'}</p>
+                {instSettings.address && <p className="font-medium text-slate-700">{instSettings.address}</p>}
                 {instSettings.city && <p className="text-slate-500">{instSettings.city}</p>}
                 {instSettings.operatingHours && (
                   <p className="text-[11px] text-slate-500 pt-0.5">
@@ -1228,7 +1243,7 @@ export default function IntranetApp() {
 
           <div suppressHydrationWarning className="pt-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-[11px] text-slate-400">
             <div suppressHydrationWarning>
-              © {new Date().getFullYear()} {instSettings.instituteName || 'Instituto de Capacitación y Gestión Pública'} - {instSettings.institutionSubtitle || 'Poder Legislativo'}. {instSettings.copyrightText || 'Todos los derechos reservados.'}
+              © {new Date().getFullYear()} {instSettings.instituteName || 'Instituto de Capacitación Legislativa'} - {instSettings.institutionSubtitle || 'Poder Legislativo'}. {instSettings.copyrightText || 'Todos los derechos reservados.'}
             </div>
             <div className="flex items-center gap-4">
               <a href="/privacidad" className="hover:text-[#0284c7] transition-colors font-medium">

@@ -33,8 +33,9 @@ import {
   Pencil,
   Trash2,
 } from 'lucide-react';
-import { ActivityItem, NewsItem, QuickLink, TeamMember, TrainingCourse, AgentCourseAudit } from '@/lib/mock-data';
+import { ActivityItem, NewsItem, QuickLink, TeamMember, TrainingCourse, TrainingResult } from '@/lib/mock-data';
 import { getLocalDateString, formatDateDisplay, getBirthdayCountdown, getShortWeekdayEs, getInstitutionalTodayParts } from '@/lib/utils';
+import { computeCsatIndex, computeTrainingMetrics, computeVisitMetrics, getMetricPeriodRef, isTimestampInPeriod } from '@/lib/metrics';
 import { ConfirmationModal } from '@/components/ConfirmationModal';
 
 /** Máximo de comunicados visibles en Inicio: 5 en la semana corriente; 6 si hay avisos con fecha posterior a la semana. */
@@ -70,7 +71,7 @@ function parseNewsDateToYmd(raw?: string): string | null {
   if (monthIdx < 0 || !Number.isInteger(day) || day < 1 || day > 31) return null;
   return `${m[3]}-${String(monthIdx + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
-import { getInstitutionalSettings, DEFAULT_SETTINGS, type InstitutionalSettings, type MetricGoalSettings, getCourseCsatStats, getCourseAudits } from '@/lib/storage';
+import { getInstitutionalSettings, DEFAULT_SETTINGS, type InstitutionalSettings, type MetricGoalSettings, getTrainingResults } from '@/lib/storage';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
 
@@ -127,7 +128,7 @@ export function HomeSection({
 }: HomeSectionProps) {
   const [selectedNews, setSelectedNews] = useState<NewsItem | null>(null);
   const [instSettings, setInstSettings] = useState<InstitutionalSettings>(DEFAULT_SETTINGS);
-  const [courseAuditsState, setCourseAuditsState] = useState<AgentCourseAudit[]>([]);
+  const [trainingResults, setTrainingResults] = useState<TrainingResult[]>([]);
 
   /** Edición de comunicado (admin): item en edición + campos del formulario. */
   const [editingNews, setEditingNews] = useState<NewsItem | null>(null);
@@ -136,11 +137,11 @@ export function HomeSection({
 
   React.useEffect(() => {
     setInstSettings(getInstitutionalSettings());
-    setCourseAuditsState(getCourseAudits());
+    setTrainingResults(getTrainingResults());
 
     const handleStorageChange = () => {
       setInstSettings(getInstitutionalSettings());
-      setCourseAuditsState(getCourseAudits());
+      setTrainingResults(getTrainingResults());
     };
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
@@ -164,12 +165,18 @@ export function HomeSection({
 
   const todayStr = getLocalDateString();
 
-  const todayActivities = activities.filter((a) => a.date === todayStr);
-  const displayActivities = todayActivities.length > 0
-    ? todayActivities.slice(0, 3)
-    : activities.filter((a) => a.date >= todayStr).slice(0, 3);
-
-  const activeActivities = displayActivities.length > 0 ? displayActivities : activities.slice(0, 3);
+  const byDateAndTime = (a: ActivityItem, b: ActivityItem): number =>
+    (a.date || '').localeCompare(b.date || '') || (a.startTime || '').localeCompare(b.startTime || '');
+  const todayActivities = activities.filter((a) => a.date === todayStr).sort(byDateAndTime);
+  // "Próximas actividades": solo hoy o fechas futuras, de la más cercana a la más lejana. Si no hay ninguna
+  // se muestra el estado vacío; antes se rellenaba con las primeras actividades de la agenda aunque fueran pasadas.
+  const activeActivities =
+    todayActivities.length > 0
+      ? todayActivities.slice(0, 3)
+      : activities
+          .filter((a) => (a.date || '') > todayStr)
+          .sort(byDateAndTime)
+          .slice(0, 3);
 
   const upcomingBirthdays = React.useMemo(() => {
     return team
@@ -179,6 +186,14 @@ export function HomeSection({
       }))
       .filter(({ countdown }) => countdown !== null && countdown.isWithin5Days);
   }, [team]);
+
+  // Reloj de minuto: el estado "finalizada" de una visita se deriva de su hora de fin, así que las
+  // métricas se recalculan solas al pasar esa hora aunque la pantalla siga abierta.
+  const [metricsClock, setMetricsClock] = useState(0);
+  React.useEffect(() => {
+    const id = window.setInterval(() => setMetricsClock((n) => n + 1), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const metrics = React.useMemo(() => {
     const goalSettings: MetricGoalSettings = instSettings.metricGoal || {
@@ -191,9 +206,10 @@ export function HomeSection({
     const isShowingVisitas = goalSettings.metricType === 'visitas';
     const isMensual = goalSettings.period === 'mensual';
 
-    const { year: currentYear, month: currentMonthIndex } = getInstitutionalTodayParts();
-    const currentMonthPrefix = `${currentYear}-${String(currentMonthIndex + 1).padStart(2, '0')}`;
-    const currentYearPrefix = `${currentYear}-`;
+    const now = new Date();
+    const periodRef = getMetricPeriodRef(goalSettings.period, now);
+    const currentYear = periodRef.year;
+    const currentMonthIndex = periodRef.monthIndex;
 
     const MONTH_NAMES = [
       'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
@@ -201,70 +217,31 @@ export function HomeSection({
     ];
     const currentPeriodLabel = isMensual ? MONTH_NAMES[currentMonthIndex] : `${currentYear}`;
 
-    // 1. Filtrado de Visitas Escolares estrictamente según el período seleccionado
-    const periodVisits = activities.filter((a) => {
-      if (a.type !== 'visita') return false;
-      return isMensual ? a.date.startsWith(currentMonthPrefix) : a.date.startsWith(currentYearPrefix);
-    });
+    // Todas las cifras salen de lib/metrics.ts (misma regla que el panel de Administración):
+    // visitas REALIZADAS = finalizadas; agentes formados = personas que completaron el curso
+    // entero y dejaron su reseña CSAT (ver reglas en ese archivo).
+    const visits = computeVisitMetrics(activities, periodRef, now);
+    const training = computeTrainingMetrics(trainingResults, periodRef, now);
+    const agentesFormados = training.agentesFormados;
+    const visitasRealizadasCount = visits.realizadas;
 
-    const confirmedVisits = periodVisits.filter(
-      (a) => a.status === 'confirmada' || a.status === 'en_curso' || a.status === 'finalizada'
-    );
-    const pendingVisits = periodVisits.filter((a) => a.status === 'pendiente');
-    const cancelledVisits = periodVisits.filter((a) => a.status === 'cancelada');
-
-    const visitasConfirmadasCount = confirmedVisits.length;
-    const visitasCount = visitasConfirmadasCount;
-    const totalVisitasConvocadas = periodVisits.length;
-    const alumnosRecibidos = confirmedVisits.reduce((sum, a) => sum + (a.attendeesCount || 0), 0);
-
-    // 2. Filtrado y cómputo de Agentes Formados según el período y estado de homologación de auditorías
-    // A. Capacitaciones presenciales de la agenda en el período
-    const periodCapacitaciones = activities.filter((a) => {
-      if (a.type !== 'capacitacion' || a.status === 'cancelada') return false;
-      return isMensual ? a.date.startsWith(currentMonthPrefix) : a.date.startsWith(currentYearPrefix);
-    });
-    const capacitacionAttendees = periodCapacitaciones.reduce((sum, a) => sum + (a.attendeesCount || 0), 0);
-
-    // B. Cursos auditados y HOMOLOGADOS por Administración (aprobado_admin) en el período
-    // Si un agente no fue aprobado, fue observado o se le reseteó/eliminó la cursada, NO suma.
-    const approvedAudits = courseAuditsState.filter((audit) => {
-      if (audit.isSample) return false; // ejemplos de demostración: no suman a métricas reales
-      if (audit.auditStatus !== 'aprobado_admin' && !audit.certifiedAt) return false;
-      
-      const auditDate = audit.lastCheckTimestamp ? new Date(audit.lastCheckTimestamp) : new Date();
-      if (isMensual) {
-        return auditDate.getFullYear() === currentYear && auditDate.getMonth() === currentMonthIndex;
-      } else {
-        return auditDate.getFullYear() === currentYear;
-      }
-    });
-    const approvedAuditsCount = approvedAudits.length;
-
-    // C. Agentes formados = SOLO conteo real:
-    // asistentes a capacitaciones presenciales cargadas en el período + agents digitales
-    // que completaron y fueron homologados por Administración (aprobado_admin).
-    // Sin bases históricas de prueba: la métrica arranca en 0 con datos reales.
-    const agentesFormados = capacitacionAttendees + approvedAuditsCount;
-
-    // 3. Índice CSAT Oficial
-    const csatData = getCourseCsatStats();
+    // Índice CSAT del mismo período: solo reseñas de cursadas completas.
+    const csatData = computeCsatIndex(trainingResults, (r) => isTimestampInPeriod(r.closedAt, periodRef));
     // Sin encuestas todavía no hay índice: se muestra "—" en lugar de un porcentaje inventado.
     const satisfaccionPct: number | null = csatData.hasData ? csatData.csatPercentage : null;
 
-    // 4. Cálculo de Metas del Administrador
+    // Cálculo de metas del administrador
     const currentTarget = isShowingVisitas ? goalSettings.targetVisitas : goalSettings.targetAgentes;
-    const currentValue = isShowingVisitas ? visitasCount : agentesFormados;
+    const currentValue = isShowingVisitas ? visitasRealizadasCount : agentesFormados;
     const objetivoPct = Math.min(100, Math.round((currentValue / Math.max(1, currentTarget)) * 100));
 
     return {
       agentesFormados,
-      visitasCount,
-      visitasConfirmadasCount,
-      visitasPendientesCount: pendingVisits.length,
-      visitasCanceladasCount: cancelledVisits.length,
-      totalVisitasConvocadas,
-      alumnosRecibidos,
+      visitasRealizadasCount,
+      visitasPorRealizarCount: visits.porRealizar,
+      visitasPendientesCount: visits.pendientes,
+      alumnosRecibidos: visits.alumnosRecibidos,
+      visitasSinAsistencia: visits.sinAsistenciaCargada,
       satisfaccionPct,
       objetivoPct,
       goalSettings,
@@ -275,7 +252,9 @@ export function HomeSection({
       currentPeriodLabel,
       currentYear,
     };
-  }, [activities, instSettings.metricGoal, courseAuditsState]);
+    // `metricsClock` fuerza el recálculo periódico (estado derivado de la hora actual).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activities, instSettings.metricGoal, trainingResults, metricsClock]);
 
   // Próximas actividades 100% correlativas con la agenda institucional
   const upcomingEvents = React.useMemo(() => {
@@ -546,7 +525,7 @@ export function HomeSection({
             {activeActivities.length === 0 ? (
               <div className="py-8 px-4 text-center border border-dashed border-slate-200 rounded-xl bg-slate-50/50 space-y-1.5">
                 <Calendar className="w-8 h-8 text-slate-300 mx-auto mb-1" />
-                <p className="text-xs font-semibold text-slate-700">No hay actividades programadas para hoy</p>
+                <p className="text-xs font-semibold text-slate-700">No hay actividades próximas programadas</p>
                 <p className="text-[11px] text-slate-500">Puedes consultar la agenda institucional o registrar una nueva visita.</p>
               </div>
             ) : (
@@ -906,16 +885,27 @@ export function HomeSection({
                 }`}
               >
                 <div suppressHydrationWarning className="text-xl sm:text-2xl font-black text-white leading-tight">
-                  {metrics.visitasConfirmadasCount}
+                  {metrics.visitasRealizadasCount}
                 </div>
                 <div className="text-[10px] text-slate-300 font-medium mt-0.5">
-                  Visitas confirmadas
+                  Visitas realizadas
                 </div>
                 <div className="text-[9px] text-sky-300 font-semibold mt-0.5">
+                  {metrics.visitasPorRealizarCount > 0 ? (
+                    <span className="text-emerald-300">+{metrics.visitasPorRealizarCount} próx. • </span>
+                  ) : null}
                   {metrics.visitasPendientesCount > 0 ? (
                     <span className="text-amber-300">+{metrics.visitasPendientesCount} pend. • </span>
                   ) : null}
                   {metrics.alumnosRecibidos.toLocaleString('es-AR')} alumnos
+                  {metrics.visitasSinAsistencia > 0 ? (
+                    <span
+                      className="text-amber-300"
+                      title="Visitas realizadas a las que todavía no se les cargó la asistencia real (se carga al editar la visita)."
+                    >
+                      {' '}• {metrics.visitasSinAsistencia} sin asistencia cargada
+                    </span>
+                  ) : null}
                 </div>
               </div>
 
@@ -971,8 +961,8 @@ export function HomeSection({
                 <div className="flex items-center justify-between text-[10px] text-slate-400">
                   <span>
                     {metrics.isShowingVisitas
-                      ? `${metrics.visitasConfirmadasCount} visitas confirmadas • ${metrics.alumnosRecibidos.toLocaleString('es-AR')} alumnos recibidos`
-                      : `${metrics.agentesFormados.toLocaleString('es-AR')} agentes capacitados ${metrics.isMensual ? 'en el mes' : 'en el ciclo anual'}`}
+                      ? `${metrics.visitasRealizadasCount} visitas realizadas • ${metrics.alumnosRecibidos.toLocaleString('es-AR')} alumnos recibidos`
+                      : `${metrics.agentesFormados.toLocaleString('es-AR')} agentes formados (curso completo + reseña CSAT) ${metrics.isMensual ? 'en el mes' : 'en el año'}`}
                   </span>
                   {metrics.isShowingVisitas && metrics.visitasPendientesCount > 0 ? (
                     <span className="text-amber-300 font-semibold">

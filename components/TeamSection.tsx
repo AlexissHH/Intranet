@@ -113,13 +113,13 @@ export function TeamSection({
     setEditingMember(null);
     setFormName('');
     setFormRole('');
-    setFormArea('Dirección General');
+    setFormArea('');
     setFormEmail('');
     setFormPhone('');
     setFormBirthday('');
-    setFormLocation('San Miguel de Tucumán');
-    setFormSchedule('Lunes a Viernes de 08:00 a 14:00 hs');
-    setFormResponsibilities('Coordinación institucional\nGestión de trámites y expedientes\nAtención a comisiones parlamentarias');
+    setFormLocation('');
+    setFormSchedule('');
+    setFormResponsibilities('');
     setIsModalOpen(true);
   };
 
@@ -159,16 +159,20 @@ export function TeamSection({
       .filter((r) => r.length > 0);
 
     const savedMember: TeamMember = {
+      // Al editar se parte del registro existente: los campos que el formulario no muestra (p. ej. el interno)
+      // no se pierden al guardar.
+      ...(editingMember ?? {}),
       id: editingMember ? editingMember.id : `team-${Date.now()}`,
       name: formName.trim(),
       role: formRole.trim(),
-      area: formArea.trim() || 'Área General',
+      // Sin valores por defecto: lo que queda vacío se guarda vacío y no se muestra.
+      area: formArea.trim(),
       email: formEmail.trim(),
       phone: formPhone.trim(),
       birthday: formBirthday.trim(),
-      location: formLocation.trim() || 'Tucumán',
-      schedule: formSchedule.trim() || 'Lunes a Viernes de 08:00 a 14:00 hs',
-      responsibilities: respArray.length > 0 ? respArray : ['Funciones institucionales asignadas'],
+      location: formLocation.trim(),
+      schedule: formSchedule.trim(),
+      responsibilities: respArray,
       avatarSeed: formName.trim().split(' ')[0],
     };
 
@@ -194,7 +198,7 @@ export function TeamSection({
           daysLeft === 0
             ? `¡Hoy es el cumpleaños de ${member.name}!`
             : `Cumpleaños en ${daysLeft} días: ${member.name}`;
-        const body = `Puesto: ${member.role}\nFecha: ${member.birthday}\nUbicación: ${member.location}\nContacto: ${member.phone} • ${member.email}`;
+        const body = `Puesto: ${member.role}\nFecha: ${member.birthday}`;
         new Notification(title, {
           body,
           icon: '/favicon.ico',
@@ -216,7 +220,8 @@ export function TeamSection({
   const handleSendGmailReminder = (member: TeamMember, daysLeft: number) => {
     const subject = `Recordatorio Institucional: Cumpleaños de ${member.name} (${member.birthday})`;
     const timing = daysLeft === 0 ? 'el día de hoy' : `en ${daysLeft} día${daysLeft > 1 ? 's' : ''}`;
-    const body = `Estimado equipo del Instituto de Capacitación y Gestión Pública,\n\nLes recordamos que ${timing} celebra su cumpleaños nuestra compañera/o ${member.name} (${member.role}).\n\nDatos de contacto institucional:\n- Teléfono / WhatsApp: ${member.phone}\n- Correo electrónico: ${member.email}\n- Lugar de residencia: ${member.location}\n- Área: ${member.area}\n\n¡Un cordial saludo y felicitaciones!\n\nInstituto de Capacitación Legislativa\nHonorable Legislatura de Tucumán`;
+    // Por privacidad el correo no lleva teléfono, domicilio ni otros datos de contacto del integrante.
+    const body = `Estimado equipo,\n\nLes recordamos que ${timing} celebra su cumpleaños nuestra compañera/o ${member.name} (${member.role}).\n\n¡Un cordial saludo y felicitaciones!\n\nInstituto de Capacitación Legislativa\nHonorable Legislatura de Tucumán`;
 
     onOpenEmailModal(member.email, subject, body);
   };
@@ -327,7 +332,7 @@ export function TeamSection({
                         {member.name}
                       </h4>
                       <p className="text-[11px] text-[#0284c7] font-semibold">{member.role}</p>
-                      <p className="text-[11px] text-slate-500">{member.location}</p>
+                      {member.location && <p className="text-[11px] text-slate-500">{member.location}</p>}
                     </div>
                     <span
                       className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase shrink-0 ${
@@ -465,9 +470,11 @@ export function TeamSection({
                       <p className="text-xs font-semibold text-[#0284c7]">
                         {member.role}
                       </p>
-                      <p className="text-[11px] text-slate-500">
-                        {member.area}
-                      </p>
+                      {member.area && (
+                        <p className="text-[11px] text-slate-500">
+                          {member.area}
+                        </p>
+                      )}
                     </div>
                   </div>
 
@@ -522,15 +529,17 @@ export function TeamSection({
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 text-slate-600 text-[11px]">
-                      <MapPin className="w-3.5 h-3.5 text-slate-400" />
-                      <span>Residencia:</span>
-                    </span>
-                    <span className="text-[11px] text-slate-700 font-medium truncate max-w-[170px]" title={member.location}>
-                      {member.location}
-                    </span>
-                  </div>
+                  {member.location && (
+                    <div className="flex items-center justify-between">
+                      <span className="flex items-center gap-1.5 text-slate-600 text-[11px]">
+                        <MapPin className="w-3.5 h-3.5 text-slate-400" />
+                        <span>Residencia:</span>
+                      </span>
+                      <span className="text-[11px] text-slate-700 font-medium truncate max-w-[170px]" title={member.location}>
+                        {member.location}
+                      </span>
+                    </div>
+                  )}
 
                   <div className="flex items-center justify-between">
                     <span className="flex items-center gap-1.5 text-slate-600 text-[11px]">
@@ -562,28 +571,32 @@ export function TeamSection({
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 text-slate-600 text-[11px]">
-                      <Clock className="w-3.5 h-3.5 text-slate-400" />
-                      <span>Horario:</span>
-                    </span>
-                    <span className="text-[11px] text-slate-700 font-medium">{member.schedule}</span>
-                  </div>
+                  {member.schedule && (
+                    <div className="flex items-center justify-between">
+                      <span className="flex items-center gap-1.5 text-slate-600 text-[11px]">
+                        <Clock className="w-3.5 h-3.5 text-slate-400" />
+                        <span>Horario:</span>
+                      </span>
+                      <span className="text-[11px] text-slate-700 font-medium">{member.schedule}</span>
+                    </div>
+                  )}
                 </div>
 
-                <div className="space-y-1.5 pt-2 border-t border-slate-100">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                    Funciones y Responsabilidades:
+                {member.responsibilities.length > 0 && (
+                  <div className="space-y-1.5 pt-2 border-t border-slate-100">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      Funciones y Responsabilidades:
+                    </div>
+                    <ul className="space-y-1 text-xs text-slate-700">
+                      {member.responsibilities.map((resp, i) => (
+                        <li key={i} className="flex items-start gap-2">
+                          <span className="w-1 h-1 rounded-full bg-[#0284c7] shrink-0 mt-1.5"></span>
+                          <span>{resp}</span>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
-                  <ul className="space-y-1 text-xs text-slate-700">
-                    {member.responsibilities.map((resp, i) => (
-                      <li key={i} className="flex items-start gap-2">
-                        <span className="w-1 h-1 rounded-full bg-[#0284c7] shrink-0 mt-1.5"></span>
-                        <span>{resp}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
+                )}
               </div>
 
               <div className="mt-4 pt-3 border-t border-slate-100 space-y-2">

@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import mammoth from 'mammoth';
 import { ResourceDocument } from '@/lib/mock-data';
+import { formatResourceUpdatedAt, getLocalDateString } from '@/lib/utils';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
 import { ConfirmationModal } from '@/components/ConfirmationModal';
@@ -293,7 +294,7 @@ export function ResourcesSection({
       category: 'nota_modelo',
       format: 'DOCX',
       description: `Documento importado desde archivo DOCX local (${docxResult.wordCount} palabras).`,
-      updatedAt: 'Hoy',
+      updatedAt: getLocalDateString(),
       contentTemplate: docxResult.rawText,
     };
     onSaveResource(newDoc);
@@ -320,7 +321,7 @@ export function ResourcesSection({
       category: newCategory,
       format: newFormat,
       description: newDesc.trim() || 'Modelo oficial cargado por administración.',
-      updatedAt: 'Hoy',
+      updatedAt: getLocalDateString(),
       driveUrl,
       contentTemplate: newTemplate.trim() || undefined,
     };
@@ -603,7 +604,7 @@ export function ResourcesSection({
                       <span>{badge.label}</span>
                     </span>
                     <span className="text-[10px] text-slate-400 shrink-0">
-                      Actualizado: {res.updatedAt}
+                      Actualizado: {formatResourceUpdatedAt(res)}
                     </span>
                   </div>
 
@@ -723,7 +724,7 @@ export function ResourcesSection({
                     <span className="text-[10px] font-extrabold uppercase text-[#0284c7]">
                       {activeResource.format} • {activeResource.category.replace('_', ' ').toUpperCase()}
                     </span>
-                    <span className="text-[10px] text-slate-400">Actualizado: {activeResource.updatedAt}</span>
+                    <span className="text-[10px] text-slate-400">Actualizado: {formatResourceUpdatedAt(activeResource)}</span>
                   </div>
                   <h3 className="text-sm sm:text-base font-bold text-[#001428] truncate">
                     {activeResource.title}

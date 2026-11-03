@@ -81,7 +81,7 @@ export function InstituteSection({ onNavigateTab, isAdmin, instSettings: propSet
               </span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-extrabold text-[#001428] tracking-tight">
-              {instSettings.instituteName || 'Instituto de Capacitación y Gestión Pública'}
+              {instSettings.instituteName || 'Instituto de Capacitación Legislativa'}
             </h1>
             <p className="text-xs sm:text-sm text-slate-600 leading-relaxed max-w-3xl">
               {instSettings.description || 'Plataforma de coordinación pedagógica, extensión cívica y administración de expedientes formativos para agentes parlamentarios.'}

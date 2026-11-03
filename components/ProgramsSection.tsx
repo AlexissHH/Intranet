@@ -11,22 +11,47 @@ import {
   Mail,
   CheckCircle2,
   Landmark,
+  Pencil,
+  Trash2,
   X,
 } from 'lucide-react';
 import { ProjectProgram } from '@/lib/mock-data';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
+import { ConfirmationModal } from '@/components/ConfirmationModal';
+import { assertSafeEmailAddress } from '@/lib/workspace';
 
 interface ProgramsSectionProps {
   programs: ProjectProgram[];
   onSaveProgram: (program: ProjectProgram) => void;
+  onDeleteProgram: (id: string) => void;
   onOpenEmailTo: (email: string, subject: string) => void;
   isAdmin?: boolean;
+}
+
+/** Renglones no vacíos de un texto (uno por línea). */
+function linesOf(text: string): string[] {
+  return text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+}
+
+/** «Etiqueta: valor» por renglón. Los renglones sin etiqueta o sin valor se ignoran: nada se completa por defecto. */
+function parseStats(text: string): { label: string; value: string }[] {
+  return linesOf(text).flatMap((line) => {
+    const idx = line.indexOf(':');
+    if (idx <= 0) return [];
+    const label = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim();
+    return label && value ? [{ label, value }] : [];
+  });
 }
 
 export function ProgramsSection({
   programs,
   onSaveProgram,
+  onDeleteProgram,
   onOpenEmailTo,
   isAdmin = false,
 }: ProgramsSectionProps) {
@@ -40,13 +65,19 @@ export function ProgramsSection({
 
   const selectedProgram = programs.find((p) => p.id === selectedProgramId) || programs[0] || null;
 
+  // Ningún campo trae valores por defecto: solo se guarda lo que el administrador escribe.
+  const [editingProgram, setEditingProgram] = useState<ProjectProgram | null>(null);
+  const [programToDelete, setProgramToDelete] = useState<ProjectProgram | null>(null);
   const [progTitle, setProgTitle] = useState('');
-  const [progBadge, setProgBadge] = useState('Nuevo Proyecto');
-  const [progAudience, setProgAudience] = useState('Comunidad parlamentaria');
+  const [progBadge, setProgBadge] = useState('');
+  const [progAudience, setProgAudience] = useState('');
   const [progSummary, setProgSummary] = useState('');
   const [progDescription, setProgDescription] = useState('');
-  const [progObjectives, setProgObjectives] = useState('Objetivo 1\nObjetivo 2\nObjetivo 3');
-  const [progEmail] = useState('instituto@legislatura.gob.ar');
+  const [progObjectives, setProgObjectives] = useState('');
+  const [progActivities, setProgActivities] = useState('');
+  const [progStats, setProgStats] = useState('');
+  const [progEmail, setProgEmail] = useState('');
+  const [progEmailError, setProgEmailError] = useState('');
 
   React.useEffect(() => {
     if (!isNewProjectModalOpen) return;
@@ -76,34 +107,87 @@ export function ProgramsSection({
     }
   };
 
-  const handleCreateProgram = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!isAdmin || !progTitle) return;
-
-    const newProg: ProjectProgram = {
-      id: 'prog-' + Date.now(),
-      title: progTitle,
-      code: progTitle.split(' ').map((w) => w[0]).join('').substring(0, 4).toUpperCase(),
-      badge: progBadge,
-      targetAudience: progAudience,
-      summary: progSummary,
-      description: progDescription || progSummary,
-      objectives: progObjectives.split('\n').filter((l) => l.trim().length > 0),
-      activities: ['Taller de apertura', 'Jornada participativa', 'Entrega de certificados'],
-      stats: [
-        { label: 'Estado', value: 'Activo' },
-        { label: 'Cohorte', value: '2026' },
-      ],
-      contactEmail: progEmail,
-      iconName: 'Landmark',
-    };
-
-    onSaveProgram(newProg);
-    setSelectedProgramId(newProg.id);
-    setIsNewProjectModalOpen(false);
+  const handleOpenCreate = () => {
+    setEditingProgram(null);
     setProgTitle('');
+    setProgBadge('');
+    setProgAudience('');
     setProgSummary('');
     setProgDescription('');
+    setProgObjectives('');
+    setProgActivities('');
+    setProgStats('');
+    setProgEmail('');
+    setProgEmailError('');
+    setIsNewProjectModalOpen(true);
+  };
+
+  const handleOpenEdit = (prog: ProjectProgram) => {
+    setEditingProgram(prog);
+    setProgTitle(prog.title);
+    setProgBadge(prog.badge || '');
+    setProgAudience(prog.targetAudience || '');
+    setProgSummary(prog.summary || '');
+    setProgDescription(prog.description || '');
+    setProgObjectives((prog.objectives || []).join('\n'));
+    setProgActivities((prog.activities || []).join('\n'));
+    setProgStats((prog.stats || []).map((st) => `${st.label}: ${st.value}`).join('\n'));
+    setProgEmail(prog.contactEmail || '');
+    setProgEmailError('');
+    setIsNewProjectModalOpen(true);
+  };
+
+  const handleSubmitProgram = (e: React.FormEvent) => {
+    e.preventDefault();
+    const title = progTitle.trim();
+    if (!isAdmin || !title) return;
+
+    // El correo es opcional; si se escribe, se valida (sin saltos de línea ni formato roto).
+    const email = progEmail.trim();
+    if (email) {
+      try {
+        assertSafeEmailAddress(email, 'Correo de coordinación');
+      } catch (err) {
+        setProgEmailError(err instanceof Error ? err.message : 'El correo de coordinación no es válido.');
+        return;
+      }
+    }
+
+    const saved: ProjectProgram = {
+      id: editingProgram ? editingProgram.id : 'prog-' + Date.now(),
+      title,
+      // El código se conserva al editar; en un alta nueva son las iniciales del título.
+      code:
+        editingProgram?.code ||
+        title
+          .split(' ')
+          .filter(Boolean)
+          .map((w) => w[0])
+          .join('')
+          .substring(0, 4)
+          .toUpperCase(),
+      badge: progBadge.trim(),
+      targetAudience: progAudience.trim(),
+      summary: progSummary.trim(),
+      description: progDescription.trim(),
+      objectives: linesOf(progObjectives),
+      activities: linesOf(progActivities),
+      stats: parseStats(progStats),
+      contactEmail: email,
+      iconName: editingProgram?.iconName || 'Landmark',
+    };
+
+    onSaveProgram(saved);
+    setSelectedProgramId(saved.id);
+    setIsNewProjectModalOpen(false);
+    setEditingProgram(null);
+  };
+
+  const confirmDeleteProgram = () => {
+    if (!programToDelete) return;
+    onDeleteProgram(programToDelete.id);
+    if (selectedProgramId === programToDelete.id) setSelectedProgramId(null);
+    setProgramToDelete(null);
   };
 
   return (
@@ -124,7 +208,7 @@ export function ProgramsSection({
 
         {isAdmin && (
           <button
-            onClick={() => setIsNewProjectModalOpen(true)}
+            onClick={handleOpenCreate}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#001428] hover:bg-[#122a45] text-white text-xs font-semibold rounded shadow-xs transition-colors cursor-pointer shrink-0"
           >
             <PlusCircle className="w-3.5 h-3.5" />
@@ -164,9 +248,11 @@ export function ProgramsSection({
                 <p className="text-xs font-bold text-[#001428] leading-tight line-clamp-2">
                   {prog.title}
                 </p>
-                <p className="text-[10px] text-[#0284c7] font-semibold mt-1 truncate">
-                  {prog.badge}
-                </p>
+                {prog.badge && (
+                  <p className="text-[10px] text-[#0284c7] font-semibold mt-1 truncate">
+                    {prog.badge}
+                  </p>
+                )}
               </div>
             </button>
           );
@@ -178,99 +264,139 @@ export function ProgramsSection({
           <div className="p-5 sm:p-6 bg-[#001428] text-white flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="space-y-1.5 max-w-3xl">
               <div className="flex items-center gap-2">
-                <span className="px-2 py-0.5 rounded bg-sky-950 text-sky-300 text-[10px] font-bold uppercase tracking-wider border border-sky-800">
-                  {selectedProgram.badge}
-                </span>
+                {selectedProgram.badge && (
+                  <span className="px-2 py-0.5 rounded bg-sky-950 text-sky-300 text-[10px] font-bold uppercase tracking-wider border border-sky-800">
+                    {selectedProgram.badge}
+                  </span>
+                )}
                 <span className="text-xs text-slate-400">Código: {selectedProgram.code}</span>
               </div>
               <h3 className="text-lg sm:text-xl font-bold text-white tracking-tight">
                 {selectedProgram.title}
               </h3>
-              <p className="text-xs text-slate-300 leading-relaxed">
-                {selectedProgram.summary}
-              </p>
+              {selectedProgram.summary && (
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  {selectedProgram.summary}
+                </p>
+              )}
             </div>
 
-            <button
-              onClick={() =>
-                onOpenEmailTo(
-                  selectedProgram.contactEmail,
-                  `Consulta sobre programa: ${selectedProgram.title}`
-                )
-              }
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#0284c7] hover:bg-[#0369a1] text-white rounded text-xs font-semibold transition-colors cursor-pointer shrink-0"
-            >
-              <Mail className="w-3.5 h-3.5" />
-              <span>Contactar Coordinación</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {selectedProgram.contactEmail && (
+                <button
+                  onClick={() =>
+                    onOpenEmailTo(
+                      selectedProgram.contactEmail,
+                      `Consulta sobre programa: ${selectedProgram.title}`
+                    )
+                  }
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#0284c7] hover:bg-[#0369a1] text-white rounded text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  <Mail className="w-3.5 h-3.5" />
+                  <span>Contactar Coordinación</span>
+                </button>
+              )}
+              {isAdmin && (
+                <>
+                  <button
+                    onClick={() => handleOpenEdit(selectedProgram)}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white/10 hover:bg-white/20 text-white rounded text-xs font-semibold transition-colors cursor-pointer border border-white/20"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                    <span>Editar</span>
+                  </button>
+                  <button
+                    onClick={() => setProgramToDelete(selectedProgram)}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Eliminar</span>
+                  </button>
+                </>
+              )}
+            </div>
           </div>
 
           <div className="p-5 sm:p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 space-y-5">
-              <div>
-                <div className="text-[10px] font-bold uppercase tracking-wider text-[#0284c7] mb-1.5">
-                  DESCRIPCIÓN GENERAL
-                </div>
-                <p className="text-xs text-slate-700 leading-relaxed">
-                  {selectedProgram.description}
-                </p>
-              </div>
-
-              <div>
-                <div className="text-[10px] font-bold uppercase tracking-wider text-[#0284c7] mb-2">
-                  OBJETIVOS ESPECÍFICOS
-                </div>
-                <div className="space-y-2">
-                  {selectedProgram.objectives.map((obj, i) => (
-                    <div key={i} className="flex items-start gap-2 p-2.5 rounded bg-slate-50 border border-slate-200 text-xs text-slate-800">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
-                      <span>{obj}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <div className="text-[10px] font-bold uppercase tracking-wider text-[#0284c7] mb-2">
-                  ACTIVIDADES CLAVE
-                </div>
-                <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-700">
-                  {selectedProgram.activities.map((act, i) => (
-                    <li key={i} className="p-2.5 rounded border border-slate-200 bg-white">
-                      • {act}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-
-            <div className="space-y-4">
-              <div className="p-4 rounded-lg bg-slate-50 border border-slate-200 space-y-3">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-[#001428]">
-                  Ficha Técnica del Proyecto
-                </div>
-
-                <div className="space-y-2 text-xs">
-                  <div>
-                    <span className="text-slate-400 block text-[10px] uppercase font-bold">Población Destinataria</span>
-                    <span className="font-semibold text-slate-800">{selectedProgram.targetAudience}</span>
+              {selectedProgram.description && (
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-[#0284c7] mb-1.5">
+                    DESCRIPCIÓN GENERAL
                   </div>
-                  <div>
-                    <span className="text-slate-400 block text-[10px] uppercase font-bold">Coordinación Operativa</span>
-                    <span className="font-semibold text-slate-800">{selectedProgram.contactEmail}</span>
+                  <p className="text-xs text-slate-700 leading-relaxed">
+                    {selectedProgram.description}
+                  </p>
+                </div>
+              )}
+
+              {selectedProgram.objectives.length > 0 && (
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-[#0284c7] mb-2">
+                    OBJETIVOS ESPECÍFICOS
+                  </div>
+                  <div className="space-y-2">
+                    {selectedProgram.objectives.map((obj, i) => (
+                      <div key={i} className="flex items-start gap-2 p-2.5 rounded bg-slate-50 border border-slate-200 text-xs text-slate-800">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                        <span>{obj}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
+              )}
 
-                <div className="pt-3 border-t border-slate-200 grid grid-cols-2 gap-2 text-center">
-                  {selectedProgram.stats?.map((st, idx) => (
-                    <div key={idx} className="p-2 bg-white rounded border border-slate-200">
-                      <div className="text-xs font-black text-[#001428]">{st.value}</div>
-                      <div className="text-[10px] text-slate-500">{st.label}</div>
+              {selectedProgram.activities.length > 0 && (
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-[#0284c7] mb-2">
+                    ACTIVIDADES CLAVE
+                  </div>
+                  <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-700">
+                    {selectedProgram.activities.map((act, i) => (
+                      <li key={i} className="p-2.5 rounded border border-slate-200 bg-white">
+                        • {act}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+
+            {(selectedProgram.targetAudience || selectedProgram.contactEmail || (selectedProgram.stats?.length ?? 0) > 0) && (
+              <div className="space-y-4">
+                <div className="p-4 rounded-lg bg-slate-50 border border-slate-200 space-y-3">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-[#001428]">
+                    Ficha Técnica del Proyecto
+                  </div>
+
+                  <div className="space-y-2 text-xs">
+                    {selectedProgram.targetAudience && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px] uppercase font-bold">Población Destinataria</span>
+                        <span className="font-semibold text-slate-800">{selectedProgram.targetAudience}</span>
+                      </div>
+                    )}
+                    {selectedProgram.contactEmail && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px] uppercase font-bold">Coordinación Operativa</span>
+                        <span className="font-semibold text-slate-800">{selectedProgram.contactEmail}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {(selectedProgram.stats?.length ?? 0) > 0 && (
+                    <div className="pt-3 border-t border-slate-200 grid grid-cols-2 gap-2 text-center">
+                      {selectedProgram.stats.map((st, idx) => (
+                        <div key={idx} className="p-2 bg-white rounded border border-slate-200">
+                          <div className="text-xs font-black text-[#001428]">{st.value}</div>
+                          <div className="text-[10px] text-slate-500">{st.label}</div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
                 </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       )}
@@ -299,7 +425,9 @@ export function ProgramsSection({
               <div className="flex items-center gap-2.5 min-w-0">
                 <Landmark className="w-5 h-5 text-[#001428] shrink-0" />
                 <div className="min-w-0">
-                  <h3 className="text-sm sm:text-base font-bold text-[#001428] tracking-tight truncate">Sumar Proyecto Institucional</h3>
+                  <h3 className="text-sm sm:text-base font-bold text-[#001428] tracking-tight truncate">
+                    {editingProgram ? 'Editar Proyecto Institucional' : 'Sumar Proyecto Institucional'}
+                  </h3>
                   <p className="text-[10px] sm:text-[11px] text-slate-500 truncate">Programas de formación, ciudadanía y extensión</p>
                 </div>
               </div>
@@ -313,7 +441,7 @@ export function ProgramsSection({
               </button>
             </div>
 
-            <form onSubmit={handleCreateProgram} className="p-4 sm:p-6 space-y-3.5 overflow-y-auto flex-1 text-xs text-slate-800">
+            <form onSubmit={handleSubmitProgram} className="p-4 sm:p-6 space-y-3.5 overflow-y-auto flex-1 text-xs text-slate-800">
               <div>
                 <label className="block text-xs font-bold text-[#001428] mb-1">Nombre del Proyecto *</label>
                 <input
@@ -333,6 +461,7 @@ export function ProgramsSection({
                     type="text"
                     value={progBadge}
                     onChange={(e) => setProgBadge(e.target.value)}
+                    placeholder="Opcional"
                     className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
                   />
                 </div>
@@ -342,6 +471,7 @@ export function ProgramsSection({
                     type="text"
                     value={progAudience}
                     onChange={(e) => setProgAudience(e.target.value)}
+                    placeholder="Opcional"
                     className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
                   />
                 </div>
@@ -353,7 +483,18 @@ export function ProgramsSection({
                   rows={2}
                   value={progSummary}
                   onChange={(e) => setProgSummary(e.target.value)}
-                  placeholder="Objetivo en 2 líneas..."
+                  placeholder="Opcional"
+                  className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#001428] mb-1">Descripción General</label>
+                <textarea
+                  rows={3}
+                  value={progDescription}
+                  onChange={(e) => setProgDescription(e.target.value)}
+                  placeholder="Opcional"
                   className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
                 />
               </div>
@@ -364,8 +505,48 @@ export function ProgramsSection({
                   rows={3}
                   value={progObjectives}
                   onChange={(e) => setProgObjectives(e.target.value)}
-                  className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-mono"
+                  placeholder="Opcional"
+                  className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#001428] mb-1">Actividades clave (una por renglón)</label>
+                <textarea
+                  rows={3}
+                  value={progActivities}
+                  onChange={(e) => setProgActivities(e.target.value)}
+                  placeholder="Opcional"
+                  className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#001428] mb-1">Datos destacados (uno por renglón)</label>
+                <textarea
+                  rows={2}
+                  value={progStats}
+                  onChange={(e) => setProgStats(e.target.value)}
+                  placeholder="Opcional. Formato «Etiqueta: valor»"
+                  className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">Los renglones sin «:» o sin valor se ignoran.</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#001428] mb-1">Correo de coordinación</label>
+                <input
+                  type="email"
+                  value={progEmail}
+                  onChange={(e) => {
+                    setProgEmail(e.target.value);
+                    setProgEmailError('');
+                  }}
+                  placeholder="Opcional"
+                  className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
+                />
+                {progEmailError && <p className="text-[10px] text-rose-600 mt-1">{progEmailError}</p>}
+                <p className="text-[10px] text-slate-400 mt-1">Si lo dejas vacío, el proyecto no muestra el botón «Contactar Coordinación».</p>
               </div>
 
               <div className="pt-3 border-t border-slate-100 flex flex-col-reverse sm:flex-row items-center justify-end gap-2 shrink-0">
@@ -380,13 +561,24 @@ export function ProgramsSection({
                   type="submit"
                   className="w-full sm:w-auto text-center px-4 py-2.5 bg-[#001428] hover:bg-[#0e4a7b] text-white text-xs font-bold rounded-lg shadow-xs transition-colors cursor-pointer"
                 >
-                  Guardar Proyecto
+                  {editingProgram ? 'Guardar Cambios' : 'Guardar Proyecto'}
                 </button>
               </div>
             </form>
           </div>
         </div>
       )}
+
+      <ConfirmationModal
+        isOpen={Boolean(programToDelete)}
+        title="Eliminar programa o proyecto"
+        description={`¿Seguro que quieres eliminar "${programToDelete?.title}"? Se quita para todos los usuarios y no se puede deshacer.`}
+        confirmLabel="Eliminar"
+        cancelLabel="Cancelar"
+        isDestructive={true}
+        onConfirm={confirmDeleteProgram}
+        onCancel={() => setProgramToDelete(null)}
+      />
     </div>
   );
 }

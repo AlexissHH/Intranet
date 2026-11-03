@@ -31,6 +31,7 @@ import {
   deleteSingleDoc,
   ensureFirestoreReady,
   getIntranetDb,
+  getSyncIdentity,
   hasActivePushFailure,
   isSyncGateOpen,
   pushCollectionDiff,
@@ -38,6 +39,7 @@ import {
   registerGateOpenHandler,
   runAccessDiagnostics,
   setFirestoreSyncGate,
+  setSyncIdentity,
   subscribeToCollection,
   subscribeToSingleDoc,
 } from './firestore';
@@ -412,9 +414,15 @@ const AUTHORIZED_USERS_COLLECTION = 'authorized_users';
 
 let usersSyncStarted = false;
 
-/** Sincroniza la lista autorizada con el backend compartido (idempotente). */
+/**
+ * Sincroniza la lista autorizada con el backend compartido (idempotente).
+ * SOLO para Administración: la lista lleva correos y nombres de todas las personas y las reglas únicamente se
+ * la dejan leer a los administradores. Un visitante solo lee su propia ficha (ver `syncAndCheckUserInFirestore`).
+ * Sin identidad conocida no se escucha nada.
+ */
 function ensureUsersSync(): void {
   if (usersSyncStarted || typeof window === 'undefined' || !isSyncGateOpen()) return;
+  if (!getSyncIdentity()?.isAdmin) return;
   const subscription = subscribeToCollection(AUTHORIZED_USERS_COLLECTION, (remoteDocs) => {
     // Si el último push falló, no aplicar un snapshot que revierta los locales más nuevos.
     if (hasActivePushFailure(AUTHORIZED_USERS_COLLECTION)) return;
@@ -453,6 +461,19 @@ function applySyncGate(authorized: boolean): void {
     usersSyncStarted = false;
     approvalModeSyncStarted = false;
   }
+  // Quién tiene la sesión: algunas lecturas (course_audits) se filtran por el email del propio usuario.
+  const profile = authorized ? cachedUserProfile : null;
+  if (profile && profile.role !== 'administrador') discardOtherUsersFromLocalCache(profile.email);
+  setSyncIdentity(
+    profile
+      ? {
+          email: profile.email,
+          isAdmin: profile.role === 'administrador',
+          // El uid solo vale si es de Firebase: el de una cuenta institucional ('inst-…') no lo acreditan las reglas.
+          ...(profile.provider === 'google' ? { uid: profile.uid } : {}),
+        }
+      : null
+  );
   setFirestoreSyncGate(authorized);
   // Un solo diagnóstico de acceso por sesión, con la sesión ADMIN:
   // distingue "reglas no visibles para esta app/base" de "cuenta no admin".
@@ -516,6 +537,28 @@ function applyRemoteUsers(remoteDocs: Record<string, unknown>[]): void {
     notifyAuthorizedUsersChanged();
   } catch {
     // Ignore (cache local sin espacio: la fuente sigue siendo Firestore)
+  }
+}
+
+/**
+ * Un visitante no necesita la lista de los demás: se descarta lo que su navegador guardó cuando todavía podía
+ * leerla (versiones anteriores) y solo se conserva su propia ficha.
+ */
+function discardOtherUsersFromLocalCache(ownEmail: string): void {
+  try {
+    const raw = localStorage.getItem(USERS_STORAGE_KEY);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    const own = ownEmail.trim().toLowerCase();
+    const kept = parsed.filter(
+      (u): u is { email: string } =>
+        typeof u === 'object' && u !== null && typeof (u as { email?: unknown }).email === 'string' &&
+        (u as { email: string }).email.toLowerCase() === own
+    );
+    if (kept.length !== parsed.length) localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(kept));
+  } catch {
+    // Ignore (la caché local es solo una ayuda)
   }
 }
 

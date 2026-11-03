@@ -9,6 +9,7 @@ import {
   InstituteAreaCard,
   AgentCourseAudit,
   CourseModuleCheck,
+  TrainingResult,
   INITIAL_ACTIVITIES,
   INITIAL_NEWS,
   INITIAL_COURSES,
@@ -19,17 +20,22 @@ import {
   INITIAL_INSTITUTE_AREAS,
   INITIAL_COURSE_AUDITS,
 } from './mock-data';
-import { generateId } from './utils';
+import { formatDateDisplay, generateId, getLocalDateString } from './utils';
+import { auditToResult, auditsToResults, isCourseAuditCompleted, isCsatCountable } from './metrics';
+import { docHash, mergeDocFields, mergeRemoteSnapshot } from './sync-merge';
+import { getMinimumReadingMinutes, isSuspiciousReadingPace } from './course-audit';
 import {
-  deleteSingleDoc,
+  consumeStaleFailure,
   ensureFirebaseApp,
   getIntranetDb,
+  getSyncIdentity,
   hasActivePushFailure,
   isBootstrapped,
   isSyncGateOpen,
   markBootstrapped,
   pushCollectionDiff,
   pushSingleDoc,
+  registerCollectionPersistence,
   registerGateOpenHandler,
   replaceCollection,
   subscribeToCollection,
@@ -54,6 +60,7 @@ const STORAGE_KEYS = {
   AREAS: 'icl_intranet_institute_areas_v2',
   SETTINGS: 'icl_intranet_settings_v2',
   COURSE_AUDITS: 'icl_intranet_course_audits_v2',
+  TRAINING_RESULTS: 'icl_intranet_training_results_v1',
   DELETED_RESOURCES: 'icl_intranet_deleted_resources_v2',
 };
 
@@ -96,6 +103,7 @@ const COLLECTION_BY_KEY: Record<string, string> = {
   [STORAGE_KEYS.TEAM]: 'team',
   [STORAGE_KEYS.AREAS]: 'institute_areas',
   [STORAGE_KEYS.COURSE_AUDITS]: 'course_audits',
+  [STORAGE_KEYS.TRAINING_RESULTS]: 'training_results',
 };
 
 /** Listas donde lo más nuevo va al PRINCIPIO (upsert 'start'): orden remoto descendente. */
@@ -136,9 +144,25 @@ function writeLocal(key: string, value: unknown): boolean {
   }
 }
 
+/** TRUE si hay una copia local guardada (distinto de "lista vacía"). */
+function hasLocalCopyOf(key: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return localStorage.getItem(key) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** Misma lista, mismo orden y mismo contenido (ignora el orden de las claves y el campo interno `__id`). */
+function sameContent(a: Record<string, unknown>[], b: Record<string, unknown>[]): boolean {
+  return a.length === b.length && a.every((item, i) => docHash(item) === docHash(b[i]));
+}
+
 /** Ordena el snapshot remoto para reproducir el orden de inserción de cada lista. */
 function sortRemoteItems(key: string, items: Record<string, unknown>[]): Record<string, unknown>[] {
-  const sorted = [...items].sort((a, b) => String(a.__id ?? '').localeCompare(String(b.__id ?? '')));
+  const docId = (x: Record<string, unknown>): string => String(x.id ?? x.__id ?? '');
+  const sorted = [...items].sort((a, b) => docId(a).localeCompare(docId(b)));
   return NEWEST_FIRST_KEYS.has(key) ? sorted.reverse() : sorted;
 }
 
@@ -177,56 +201,104 @@ function ensureBackendSync(): void {
 
   // 1) Colecciones de registros
   Object.entries(COLLECTION_BY_KEY).forEach(([localKey, collectionName]) => {
-    const pushLocalToRemote = () => {
-      const current = safeGet<unknown[]>(localKey, []);
-      if (Array.isArray(current) && current.length >= 0) {
-        void pushCollectionDiff(collectionName, current as Record<string, unknown>[], idOf);
-      }
-    };
-    const unsub = subscribeToCollection(collectionName, (remote) => {
-      // Si el último push de esta clave falló (p. ej. reglas sin publicar), un snapshot
-      // viejo NO debe revertir los cambios locales más recientes del usuario.
+    // El último estado sincronizado se recuerda entre recargas (ver lib/sync-merge.ts).
+    registerCollectionPersistence(collectionName, localKey);
+    // Las cursadas (course_audits) las lee Administración completas y cada agente solo las propias (reglas):
+    // la consulta DEBE llevar ese filtro, o Firestore la rechaza entera. Sin identidad conocida no se escucha.
+    let onlyWhere: { field: string; value: string } | undefined;
+    if (collectionName === 'course_audits') {
+      const identity = getSyncIdentity();
+      if (!identity) return;
+      if (!identity.isAdmin) onlyWhere = { field: 'agentEmail', value: identity.email };
+    }
+    const unsub = subscribeToCollection(collectionName, (remote, info) => {
+      // Datos de la caché del SDK sin confirmar con el servidor: no sirven para decidir qué se borró.
+      if (info.fromCache) return;
+      // Si el último envío de esta colección falló, un snapshot viejo NO debe revertir los cambios
+      // locales más recientes del usuario (se reintenta solo).
       if (hasActivePushFailure(collectionName)) return;
-      if (remote.length === 0) {
-        // Colección vacía = primero en conectarse con datos: se siembra lo local.
-        if (!isBootstrapped(collectionName)) {
-          markBootstrapped(collectionName);
-          pushLocalToRemote();
+
+      const hasLocalCopy = hasLocalCopyOf(localKey);
+      const local = hasLocalCopy ? safeGet<Record<string, unknown>[]>(localKey, []) : [];
+      // Mezcla con el último estado sincronizado: aplica los borrados y cambios de otros usuarios,
+      // y conserva (y envía) lo que este navegador todavía no logró publicar.
+      const { merged, hasPending } = mergeRemoteSnapshot({
+        local,
+        remote,
+        previousKnown: hasLocalCopy ? info.previousKnown : null,
+      });
+      const next = sortRemoteItems(localKey, merged);
+
+      if (!sameContent(local, next)) {
+        suppressRemotePush = true;
+        try {
+          writeLocal(localKey, next);
+        } finally {
+          suppressRemotePush = false;
         }
-        return;
       }
-      suppressRemotePush = true;
-      try {
-        writeLocal(localKey, sortRemoteItems(localKey, remote));
-      } finally {
-        suppressRemotePush = false;
+      if (hasPending) {
+        void pushCollectionDiff(collectionName, next, idOf);
+      } else if (localKey === STORAGE_KEYS.COURSE_AUDITS) {
+        backfillOwnAuditUids();
       }
-    });
+    }, onlyWhere);
     if (unsub) activeStorageSubscriptions.push(unsub);
   });
 
   // 2) Documentos individuales (settings + lista de recursos eliminados)
   Object.entries(META_DOC_PATHS).forEach(([localKey, [col, docId]]) => {
     const pathKey = localKey as string;
-    const pushLocalToRemote = () => {
-      const value = safeGet(pathKey, pathKey === STORAGE_KEYS.SETTINGS ? {} : []);
-      void pushSingleDoc(String(col), String(docId), wrapMetaValue(pathKey, value));
+    const localWrapped = (): Record<string, unknown> =>
+      wrapMetaValue(pathKey, safeGet(pathKey, pathKey === STORAGE_KEYS.SETTINGS ? {} : []));
+    const pushLocalToRemote = (quiet = false) => {
+      // `perField`: solo viajan los campos que cambiaron, no el documento entero (ver pushSingleDoc).
+      void pushSingleDoc(String(col), String(docId), localWrapped(), { perField: true, ...(quiet ? { quiet: true } : {}) });
     };
-    const unsub = subscribeToSingleDoc(String(col), String(docId), (remoteValue, exists) => {
-      if (hasActivePushFailure(`${col}/${docId}`)) return;
+    const unsub = subscribeToSingleDoc(String(col), String(docId), (remoteValue, exists, info) => {
+      // Datos de la caché del SDK sin confirmar con el servidor (p. ej. arranque sin conexión): no dicen
+      // si el documento existe ni qué contiene. Si se tomaran como "no existe" se publicaría la copia local encima.
+      if (info.fromCache) return;
+      const failureKey = `${col}/${docId}`;
+      if (hasActivePushFailure(failureKey)) {
+        // Si el envío falló en una sesión ANTERIOR, el cambio sigue en la copia local: se reintenta ahora
+        // en lugar de pisarlo con la versión remota.
+        if (consumeStaleFailure(failureKey)) pushLocalToRemote();
+        return;
+      }
+      const hasLocalCopy = hasLocalCopyOf(pathKey);
       if (!exists) {
         if (!isBootstrapped(pathKey)) {
           markBootstrapped(pathKey);
-          pushLocalToRemote();
+          // Publicación inicial: solo si hay una copia local real, y en silencio. Una cuenta sin permiso de
+          // escritura no debe quedar marcada con un envío fallido (ignoraría lo que publique un administrador).
+          if (hasLocalCopy) pushLocalToRemote(true);
         }
         return;
       }
+      let toApply: unknown = remoteValue;
+      let hasPending = false;
+      if (hasLocalCopy) {
+        const localDoc = localWrapped();
+        if (docHash(localDoc) === info.remoteHash) return; // ya coinciden
+        // Mezcla campo a campo con lo último sincronizado: los campos que cambió otro usuario se toman del
+        // servidor, y los que este navegador cambió y Firestore todavía no recibió (p. ej. guardado sin
+        // conexión y recarga) se conservan y se reenvían. Si no hay estado conocido, manda el remoto.
+        const result = mergeDocFields({
+          local: localDoc,
+          remote: (remoteValue ?? {}) as Record<string, unknown>,
+          knownFields: info.knownFields,
+        });
+        hasPending = result.pendingFields.length > 0 || result.pendingRemovals.length > 0;
+        if (hasPending) toApply = result.merged;
+      }
       suppressRemotePush = true;
       try {
-        writeLocal(pathKey, unwrapMetaValue(pathKey, remoteValue));
+        writeLocal(pathKey, unwrapMetaValue(pathKey, toApply));
       } finally {
         suppressRemotePush = false;
       }
+      if (hasPending) pushLocalToRemote();
     });
     if (unsub) activeStorageSubscriptions.push(unsub);
   });
@@ -266,8 +338,31 @@ function pushRemoteUnlessSuppressed(key: string, value: unknown): void {
   const meta = META_DOC_PATHS as Record<string, [string, string]> | undefined;
   const path = meta?.[key];
   if (path) {
-    void pushSingleDoc(path[0], path[1], wrapMetaValue(key, value));
+    lastMetaPush.set(key, pushSingleDoc(path[0], path[1], wrapMetaValue(key, value), { perField: true }));
   }
+}
+
+/** Último envío de cada documento individual, para poder confirmarle al usuario si llegó a Firestore. */
+const lastMetaPush = new Map<string, Promise<boolean>>();
+
+export type SettingsSyncOutcome = 'synced' | 'pending' | 'failed';
+
+/**
+ * Espera el resultado del último guardado de la configuración institucional:
+ *  - 'synced': Firestore lo confirmó.
+ *  - 'failed': no se pudo enviar (reglas, red, o no hay base compartida): queda solo en este navegador y se reintenta.
+ *  - 'pending': Firestore no respondió a tiempo (típico sin conexión): el cambio sigue en cola.
+ */
+export function waitForInstitutionalSettingsSync(timeoutMs = 8000): Promise<SettingsSyncOutcome> {
+  const push = lastMetaPush.get(STORAGE_KEYS.SETTINGS);
+  if (!push) return Promise.resolve('failed');
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve('pending'), timeoutMs);
+    void push.then((ok) => {
+      clearTimeout(timer);
+      resolve(ok ? 'synced' : 'failed');
+    });
+  });
 }
 
 /** Arranque público de la sincronización (la UI lo llama al montar la app). */
@@ -278,10 +373,17 @@ export function initSharedBackend(): void {
 
 // Sin sesión aprobada los listeners no se abren: al loguear el gate re-invoca esto; al desloguear limpia.
 if (typeof window !== 'undefined') {
+  let syncedIdentityKey = '';
   registerGateOpenHandler(() => {
     if (isSyncGateOpen()) {
+      // Si cambió quién tiene la sesión (o su rol), los listeners con filtro por usuario se vuelven a crear.
+      const identity = getSyncIdentity();
+      const identityKey = identity ? `${identity.email}|${identity.isAdmin ? 'admin' : 'user'}` : '';
+      if (backendSyncStarted && identityKey !== syncedIdentityKey) stopBackendSync();
+      syncedIdentityKey = identityKey;
       ensureBackendSync();
     } else {
+      syncedIdentityKey = '';
       stopBackendSync();
     }
   });
@@ -365,16 +467,12 @@ export function getActivities(): ActivityItem[] {
 export function saveActivity(activity: ActivityItem): ActivityItem[] {
   const updated = upsertById(getActivities(), activity, 'start');
   safeSet(STORAGE_KEYS.ACTIVITIES, updated);
-  void pushSingleDoc('activities', activity.id, activity).catch((e) =>
-    console.error('Error guardando actividad en Firestore:', e)
-  );
   return updated;
 }
 
 export function deleteActivity(id: string): ActivityItem[] {
   const updated = removeById(getActivities(), id);
   safeSet(STORAGE_KEYS.ACTIVITIES, updated);
-  void deleteSingleDoc('activities', id).catch((e) => console.error('Error eliminando actividad de Firestore:', e));
   return updated;
 }
 
@@ -394,9 +492,6 @@ export function updateActivityStatus(
     statusUpdatedAt: new Date().toISOString(),
   };
   safeSet(STORAGE_KEYS.ACTIVITIES, updated);
-  void pushSingleDoc('activities', id, updated[exists]).catch((e) =>
-    console.error('Error actualizando estado de actividad en Firestore:', e)
-  );
   return updated;
 }
 
@@ -419,9 +514,6 @@ export function saveNews(newsItem: NewsItem): NewsItem[] {
 
   updatedList = upsertById(updatedList, newsItem, 'start');
   safeSet(STORAGE_KEYS.NEWS, updatedList);
-  void pushSingleDoc('news', newsItem.id, newsItem).catch((e) =>
-    console.error('Error guardando comunicado en Firestore:', e)
-  );
 
   // Si se marcó como aviso interno, activar el banner institucional para que aparezca en portada
   if (newsItem.isAnnouncement) {
@@ -447,12 +539,6 @@ export function setAnnouncementNewsId(newsId: string | null): NewsItem[] {
     if (!settings.isAnnouncementActive) {
       saveInstitutionalSettings({ ...settings, isAnnouncementActive: true });
     }
-    const target = updated.find((n) => n.id === newsId);
-    if (target) {
-      void pushSingleDoc('news', target.id, target).catch((e) =>
-        console.error('Error actualizando aviso interno en Firestore:', e)
-      );
-    }
   }
 
   return updated;
@@ -461,7 +547,6 @@ export function setAnnouncementNewsId(newsId: string | null): NewsItem[] {
 export function deleteNews(id: string): NewsItem[] {
   const updated = removeById(getNews(), id);
   safeSet(STORAGE_KEYS.NEWS, updated);
-  void deleteSingleDoc('news', id).catch((e) => console.error('Error eliminando comunicado de Firestore:', e));
   return updated;
 }
 
@@ -473,16 +558,12 @@ export function getCourses(): TrainingCourse[] {
 export function saveCourse(course: TrainingCourse): TrainingCourse[] {
   const updated = upsertById(getCourses(), course, 'start');
   safeSet(STORAGE_KEYS.COURSES, updated);
-  void pushSingleDoc('courses', course.id, course).catch((e) =>
-    console.error('Error guardando curso en Firestore:', e)
-  );
   return updated;
 }
 
 export function deleteCourse(id: string): TrainingCourse[] {
   const updated = removeById(getCourses(), id);
   safeSet(STORAGE_KEYS.COURSES, updated);
-  void deleteSingleDoc('courses', id).catch((e) => console.error('Error eliminando curso de Firestore:', e));
   return updated;
 }
 
@@ -494,16 +575,12 @@ export function getPrograms(): ProjectProgram[] {
 export function saveProgram(program: ProjectProgram): ProjectProgram[] {
   const updated = upsertById(getPrograms(), program, 'end');
   safeSet(STORAGE_KEYS.PROGRAMS, updated);
-  void pushSingleDoc('programs', program.id, program).catch((e) =>
-    console.error('Error guardando programa en Firestore:', e)
-  );
   return updated;
 }
 
 export function deleteProgram(id: string): ProjectProgram[] {
   const updated = removeById(getPrograms(), id);
   safeSet(STORAGE_KEYS.PROGRAMS, updated);
-  void deleteSingleDoc('programs', id).catch((e) => console.error('Error eliminando programa de Firestore:', e));
   return updated;
 }
 
@@ -529,9 +606,6 @@ export function getResources(): ResourceDocument[] {
 export function saveResource(resDoc: ResourceDocument): ResourceDocument[] {
   const updated = upsertById(getResources(), resDoc, 'start');
   safeSet(STORAGE_KEYS.RESOURCES, updated);
-  void pushSingleDoc('resources', resDoc.id, resDoc).catch((e) =>
-    console.error('Error guardando recurso en Firestore:', e)
-  );
   // If previously deleted, unmark it
   const deletedIds = safeGet<string[]>(STORAGE_KEYS.DELETED_RESOURCES, []);
   if (deletedIds.includes(resDoc.id)) {
@@ -547,11 +621,13 @@ export function deleteResource(id: string): ResourceDocument[] {
   const updated = removeById(getResources(), id);
   safeSet(STORAGE_KEYS.RESOURCES, updated);
 
+  // La lista de eliminados solo sirve para que un recurso INICIAL (INITIAL_RESOURCES) no reaparezca. Un recurso
+  // creado por un administrador no la necesita: anotarlo no tendría efecto y, como la lista viaja entera en un
+  // solo campo, dos administradores borrando a la vez podrían pisarse. Hoy INITIAL_RESOURCES está vacío.
   const deletedIds = safeGet<string[]>(STORAGE_KEYS.DELETED_RESOURCES, []);
-  if (!deletedIds.includes(id)) {
+  if (INITIAL_RESOURCES.some((r) => r.id === id) && !deletedIds.includes(id)) {
     safeSet(STORAGE_KEYS.DELETED_RESOURCES, [...deletedIds, id]);
   }
-  void deleteSingleDoc('resources', id).catch((e) => console.error('Error eliminando recurso de Firestore:', e));
   return updated;
 }
 
@@ -563,16 +639,12 @@ export function getQuickLinks(): QuickLink[] {
 export function saveQuickLink(link: QuickLink): QuickLink[] {
   const updated = upsertById(getQuickLinks(), link, 'end');
   safeSet(STORAGE_KEYS.LINKS, updated);
-  void pushSingleDoc('links', link.id, link).catch((e) =>
-    console.error('Error guardando enlace en Firestore:', e)
-  );
   return updated;
 }
 
 export function deleteQuickLink(id: string): QuickLink[] {
   const updated = removeById(getQuickLinks(), id);
   safeSet(STORAGE_KEYS.LINKS, updated);
-  void deleteSingleDoc('links', id).catch((e) => console.error('Error eliminando enlace de Firestore:', e));
   return updated;
 }
 
@@ -584,16 +656,12 @@ export function getTeam(): TeamMember[] {
 export function saveTeamMember(member: TeamMember): TeamMember[] {
   const updated = upsertById(getTeam(), member, 'end');
   safeSet(STORAGE_KEYS.TEAM, updated);
-  void pushSingleDoc('team', member.id, member).catch((e) =>
-    console.error('Error guardando integrante en Firestore:', e)
-  );
   return updated;
 }
 
 export function deleteTeamMember(id: string): TeamMember[] {
   const updated = removeById(getTeam(), id);
   safeSet(STORAGE_KEYS.TEAM, updated);
-  void deleteSingleDoc('team', id).catch((e) => console.error('Error eliminando integrante de Firestore:', e));
   return updated;
 }
 
@@ -622,7 +690,6 @@ export function deleteInstituteArea(id: string): InstituteAreaCard[] {
   const current = getInstituteAreas();
   const updated = current.filter((a) => a.id !== id);
   const reindexed = updated.map((card, idx) => ({ ...card, order: idx + 1 }));
-  void deleteSingleDoc('institute_areas', id).catch((e) => console.error('Error eliminando área de Firestore:', e));
   return saveInstituteAreas(reindexed);
 }
 
@@ -699,15 +766,18 @@ export interface InstitutionalSettings {
 }
 
 export const DEFAULT_SETTINGS: InstitutionalSettings = {
-  instituteName: 'Instituto de Capacitación y Gestión Pública',
+  instituteName: 'Instituto de Capacitación Legislativa',
   institutionSubtitle: 'Poder Legislativo',
-  address: 'Palacio Legislativo - Anexo Rivadavia, Av. Rivadavia 1864, Piso 3°',
-  city: 'Ciudad Autónoma de Buenos Aires',
-  contactEmail: 'contacto@instituto.legislatura.gob.ar',
-  phone: 'Conmutador: (011) 4370-7100',
-  receptionExtension: 'int. 4022',
-  techSupportExtension: 'int. 4108',
-  operatingHours: 'Lunes a Viernes de 08:00 a 18:00 hs',
+  // Datos de contacto SIN valor por defecto: no hay forma de saber desde el código cuáles son los reales, y un
+  // dato inventado se mostraría como oficial en el pie de página y en la sección Instituto. Cada campo vacío
+  // simplemente no se muestra; se cargan en Administración → Datos institucionales.
+  address: '',
+  city: '',
+  contactEmail: '',
+  phone: '',
+  receptionExtension: '',
+  techSupportExtension: '',
+  operatingHours: '',
   announcementText: 'Período lectivo y calendario de visitas escolares en curso.',
   isAnnouncementActive: false,
   metricGoal: DEFAULT_GOAL_SETTINGS,
@@ -736,9 +806,34 @@ export const DEFAULT_SETTINGS: InstitutionalSettings = {
   ],
 };
 
+/**
+ * Valores que versiones anteriores del código sembraron como si fueran reales (el nombre del instituto y los
+ * datos de contacto de ejemplo; la dirección ni siquiera es de la Legislatura). Si la base compartida ya los
+ * tiene guardados, se muestran como "sin cargar" en lugar de seguir pasando por oficiales. Solo se compara el
+ * texto EXACTO de esos ejemplos: nada se escribe en Firestore; al guardar la configuración queda corregido.
+ */
+const LEGACY_SAMPLE_SETTINGS = {
+  instituteName: 'Instituto de Capacitación y Gestión Pública',
+  address: 'Palacio Legislativo - Anexo Rivadavia, Av. Rivadavia 1864, Piso 3°',
+  city: 'Ciudad Autónoma de Buenos Aires',
+  contactEmail: 'contacto@instituto.legislatura.gob.ar',
+  phone: 'Conmutador: (011) 4370-7100',
+  receptionExtension: 'int. 4022',
+  techSupportExtension: 'int. 4108',
+  operatingHours: 'Lunes a Viernes de 08:00 a 18:00 hs',
+} as const;
+
+function withoutLegacySamples(settings: InstitutionalSettings): InstitutionalSettings {
+  const patch: Partial<Record<keyof typeof LEGACY_SAMPLE_SETTINGS, string>> = {};
+  (Object.keys(LEGACY_SAMPLE_SETTINGS) as (keyof typeof LEGACY_SAMPLE_SETTINGS)[]).forEach((key) => {
+    if (settings[key] === LEGACY_SAMPLE_SETTINGS[key]) patch[key] = DEFAULT_SETTINGS[key] ?? '';
+  });
+  return { ...settings, ...patch };
+}
+
 export function getInstitutionalSettings(): InstitutionalSettings {
   const current = safeGet<InstitutionalSettings>(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
-  return {
+  return withoutLegacySamples({
     ...DEFAULT_SETTINGS,
     ...current,
     objectivesList:
@@ -753,7 +848,7 @@ export function getInstitutionalSettings(): InstitutionalSettings {
       ...DEFAULT_GOAL_SETTINGS,
       ...(current?.metricGoal || {}),
     },
-  };
+  });
 }
 
 export function saveInstitutionalSettings(settings: InstitutionalSettings): InstitutionalSettings {
@@ -762,8 +857,9 @@ export function saveInstitutionalSettings(settings: InstitutionalSettings): Inst
     ...settings,
     instituteName: settings.instituteName?.trim() || DEFAULT_SETTINGS.instituteName,
     institutionSubtitle: settings.institutionSubtitle?.trim() || DEFAULT_SETTINGS.institutionSubtitle,
-    address: settings.address?.trim() || DEFAULT_SETTINGS.address,
-    contactEmail: settings.contactEmail?.trim() || DEFAULT_SETTINGS.contactEmail,
+    // Se pueden dejar vacíos: un campo vacío no se muestra (no se restaura ningún valor inventado).
+    address: settings.address?.trim() ?? '',
+    contactEmail: settings.contactEmail?.trim() ?? '',
     missionTag: settings.missionTag?.trim() || DEFAULT_SETTINGS.missionTag,
     missionTitle: settings.missionTitle?.trim() || DEFAULT_SETTINGS.missionTitle,
     missionText: settings.missionText?.trim() || DEFAULT_SETTINGS.missionText,
@@ -815,6 +911,7 @@ function publishInitialStateToSharedBackend(): void {
     [COLLECTION_BY_KEY[STORAGE_KEYS.TEAM], INITIAL_TEAM],
     [COLLECTION_BY_KEY[STORAGE_KEYS.AREAS], INITIAL_INSTITUTE_AREAS],
     [COLLECTION_BY_KEY[STORAGE_KEYS.COURSE_AUDITS], INITIAL_COURSE_AUDITS],
+    [COLLECTION_BY_KEY[STORAGE_KEYS.TRAINING_RESULTS], []],
   ];
   collectionSeeds.forEach(([name, items]) => {
     void replaceCollection(
@@ -847,13 +944,71 @@ export function saveCourseAudits(audits: AgentCourseAudit[]): AgentCourseAudit[]
     auditVerdict: (a.auditVerdict || '').replace(/^[✅⚠️⏳]\s*/, ''),
   }));
   safeSet(STORAGE_KEYS.COURSE_AUDITS, cleaned);
+  mirrorTrainingResults(cleaned);
   return cleaned;
+}
+
+/**
+ * Resultados anónimos de las cursadas (colección `training_results`): lo único de la capacitación que ven
+ * los demás usuarios. Se publican desde las cursadas con `agentUid` (sin él no se puede acreditar que el
+ * resultado es del dueño): se crean al dejar la reseña, se actualizan si Administración homologa u observa, y
+ * se quitan si la cursada se reinicia. Nunca se borra un resultado por no encontrar su cursada en la copia local.
+ */
+/**
+ * Cursadas anteriores a `agentUid`: el propio agente las completa al abrir la intranet (campo opcional, solo en
+ * SUS cursadas; las reglas exigen que sea su uid). Así su resultado se publica en `training_results` y deja de
+ * contarse por email. También reemplaza un uid que no es de Firebase. No toca cursadas ajenas.
+ */
+function backfillOwnAuditUids(): void {
+  const identity = getSyncIdentity();
+  if (!identity?.uid) return;
+  const uid = identity.uid;
+  const audits = getCourseAudits();
+  let changed = false;
+  const next = audits.map((a) => {
+    if (a.isSample || a.agentUid === uid) return a;
+    if ((a.agentEmail || '').trim().toLowerCase() !== identity.email) return a;
+    changed = true;
+    return { ...a, agentUid: uid };
+  });
+  if (changed) saveCourseAudits(next);
+}
+
+function mirrorTrainingResults(audits: AgentCourseAudit[]): void {
+  const byId = new Map(safeGet<TrainingResult[]>(STORAGE_KEYS.TRAINING_RESULTS, []).map((r) => [r.id, r]));
+  let changed = false;
+  for (const audit of audits) {
+    if (!audit.agentUid) continue;
+    const desired = auditToResult(audit, audit.agentUid);
+    const existing = byId.get(audit.id);
+    if (desired) {
+      if (!existing || docHash(existing as unknown as Record<string, unknown>) !== docHash(desired as unknown as Record<string, unknown>)) {
+        byId.set(audit.id, desired);
+        changed = true;
+      }
+    } else if (existing) {
+      byId.delete(audit.id);
+      changed = true;
+    }
+  }
+  if (changed) safeSet(STORAGE_KEYS.TRAINING_RESULTS, [...byId.values()]);
+}
+
+/**
+ * Resultados de capacitación para las cifras de Inicio/Administración y el índice CSAT. Une los resultados
+ * publicados por todos con los calculados desde las cursadas que este navegador puede leer (todas, si es
+ * Administración; las propias, si es un agente). Ante el mismo id manda el calculado, que es el más fresco.
+ */
+export function getTrainingResults(): TrainingResult[] {
+  const byId = new Map(safeGet<TrainingResult[]>(STORAGE_KEYS.TRAINING_RESULTS, []).map((r) => [r.id, r]));
+  for (const r of auditsToResults(getCourseAudits())) byId.set(r.id, r);
+  return [...byId.values()];
 }
 
 export function toggleCourseModuleCheck(
   course: TrainingCourse,
   unitIndex: number,
-  user: { displayName?: string; email?: string }
+  user: { displayName?: string; email?: string; uid?: string }
 ): { updatedAudit: AgentCourseAudit; allAudits: AgentCourseAudit[] } {
   const currentAudits = getCourseAudits();
   const userEmail = (user.email || 'agente.intranet@legislatura.gob.ar').toLowerCase().trim();
@@ -875,6 +1030,7 @@ export function toggleCourseModuleCheck(
       durationHours: course.durationHours,
       agentName: userName,
       agentEmail: userEmail,
+      ...(user.uid ? { agentUid: user.uid } : {}),
       agentArea: 'Poder Legislativo',
       checks: [],
       totalModules: totalUnits,
@@ -886,6 +1042,8 @@ export function toggleCourseModuleCheck(
     };
   } else {
     audit = { ...currentAudits[auditIndex] };
+    // Cursadas anteriores a `agentUid`: se completa al cursar (solo el dueño llega acá).
+    if (user.uid && audit.agentUid !== user.uid) audit.agentUid = user.uid;
   }
 
   // Integridad del certificado: una cursada ya homologada por Administración no puede ser
@@ -937,12 +1095,17 @@ export function toggleCourseModuleCheck(
 
   // Audit logic: Check for simultaneous burst vs consistent spaced reading
   if (audit.isFullyCompleted) {
-    // If course is 10 hours or more, but all units were checked in less than 5 minutes
-    if (course.durationHours >= 10 && audit.timeDeltaMinutes < 5) {
+    // Ritmo de lectura (lib/course-audit.ts): vale para todos los cursos, no solo los largos.
+    if (isSuspiciousReadingPace({ durationHours: course.durationHours, timeDeltaMinutes: audit.timeDeltaMinutes })) {
       audit.auditStatus = 'alerta_simultanea';
-      audit.auditVerdict = `ALERTA: Checks Simultáneos Detectados. Marcó los ${totalUnits} módulos en ${
-        audit.timeDeltaMinutes < 1 ? 'menos de 1 minuto' : `${audit.timeDeltaMinutes} minutos`
-      } para un curso de ${course.durationHours} hs lectivas. Posible omisión de material en Drive.`;
+      audit.auditVerdict =
+        totalUnits < 2
+          ? `ALERTA: Curso de un solo módulo. No se puede verificar el tiempo de lectura; requiere la homologación de Administración.`
+          : `ALERTA: Checks Simultáneos Detectados. Marcó los ${totalUnits} módulos en ${
+              audit.timeDeltaMinutes < 1 ? 'menos de 1 minuto' : `${audit.timeDeltaMinutes} minutos`
+            } para un curso de ${course.durationHours} hs lectivas (mínimo esperable: ${getMinimumReadingMinutes(
+              course.durationHours
+            )} min). Posible omisión de material en Drive.`;
     } else {
       audit.auditStatus = 'consistente';
       const hoursDiff = Math.round(audit.timeDeltaMinutes / 60);
@@ -969,7 +1132,8 @@ export function toggleCourseModuleCheck(
 
 export function adminApproveCourseAudit(auditId: string): AgentCourseAudit[] {
   const current = getCourseAudits();
-  const formattedToday = new Date().toLocaleDateString('es-AR');
+  // Fecha en hora institucional (no la del navegador de quien homologa), con el formato de siempre (d/m/aaaa).
+  const formattedToday = formatDateDisplay(getLocalDateString(), { day: 'numeric', month: 'numeric', year: 'numeric' });
   const updated = current.map((a) => {
     if (a.id === auditId) {
       // Solo se puede homologar si el agente completó el 100% del temario
@@ -1018,6 +1182,7 @@ export function adminResetCourseAudit(auditId: string): AgentCourseAudit[] {
         certifiedAt: undefined,
         csatRating: undefined,
         csatComment: undefined,
+        csatSubmittedAt: undefined,
         adminNotes: 'Cursada reiniciada por auditoría. El agente debe reiniciar las lecturas.',
       };
     }
@@ -1029,21 +1194,33 @@ export function adminResetCourseAudit(auditId: string): AgentCourseAudit[] {
 export function adminDeleteCourseAudit(auditId: string): AgentCourseAudit[] {
   const current = getCourseAudits();
   const updated = current.filter((a) => a.id !== auditId);
+  // Su resultado anónimo también se quita (la cursada ya no existe).
+  const results = safeGet<TrainingResult[]>(STORAGE_KEYS.TRAINING_RESULTS, []);
+  if (results.some((r) => r.id === auditId)) {
+    safeSet(STORAGE_KEYS.TRAINING_RESULTS, results.filter((r) => r.id !== auditId));
+  }
   return saveCourseAudits(updated);
 }
 
 export function submitAuditCsat(
   auditId: string,
   rating: 'Muy Satisfecho' | 'Satisfecho' | 'Neutral' | 'Insatisfecho',
-  comment?: string
+  comment?: string,
+  uid?: string
 ): AgentCourseAudit[] {
   const current = getCourseAudits();
+  const target = current.find((a) => a.id === auditId);
+  // La reseña solo se acepta de una cursada completa y una única vez: ni calificaciones de
+  // cursos sin terminar ni cambios posteriores que alteren el índice.
+  if (!target || !isCourseAuditCompleted(target) || target.csatRating) return current;
   const updated = current.map((a) => {
     if (a.id === auditId) {
       return {
         ...a,
         csatRating: rating,
         csatComment: comment || '',
+        csatSubmittedAt: Date.now(),
+        ...(uid && a.agentUid !== uid ? { agentUid: uid } : {}),
       };
     }
     return a;
@@ -1073,10 +1250,11 @@ export interface CourseCsatStats {
  * Calculates official CSAT (Customer/Agent Satisfaction Score) for training courses.
  * Industry standard CSAT: % of positive responses ('Muy Satisfecho' + 'Satisfecho') over total respondents.
  */
-export function getCourseCsatStats(): CourseCsatStats {
+export function getCourseCsatStats(filter?: (audit: AgentCourseAudit) => boolean): CourseCsatStats {
   const audits = getCourseAudits();
-  // Los registros de ejemplo (isSample) nunca cuentan en una métrica real.
-  const rated = audits.filter((a) => a.csatRating && !a.isSample);
+  // Solo cuentan reseñas de cursadas COMPLETAS; los registros de ejemplo (isSample) nunca cuentan.
+  // `filter` permite acotar por período (ver lib/metrics.ts).
+  const rated = audits.filter((a) => isCsatCountable(a) && (!filter || filter(a)));
 
   if (rated.length === 0) {
     // Antes se devolvía un 96 % / 4,8 inventado como si fuera una medición real.

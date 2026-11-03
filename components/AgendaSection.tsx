@@ -40,7 +40,8 @@ import {
   type VisitCsatDoc,
 } from '@/lib/visit-csat';
 import { subscribeToCollection, VISIT_CSAT_COLLECTION } from '@/lib/firestore';
-import { getLocalDateString, getInstitutionalTodayParts, isWeekendDay, getWeekendDayName, INSTITUTIONAL_TIMEZONE } from '@/lib/utils';
+import { getLocalDateString, getInstitutionalTodayParts, isWeekendDay, getWeekendDayName, formatResourceUpdatedAt } from '@/lib/utils';
+import { getEffectiveActivityStatus as getEffectiveStatus, getInstitutionalNowStamp } from '@/lib/metrics';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
 import {
@@ -110,37 +111,6 @@ function getStatusChip(status?: string): { label: string; cls: string } {
     label: STATUS_CHIP_LABELS[status] ?? status.replace(/_/g, ' '),
     cls: STATUS_CHIP_STYLES[status] ?? 'text-slate-600 bg-slate-50 border border-slate-200',
   };
-}
-
-/** Ahora mismo en la zona institucional: fecha YYYY-MM-DD y hora HH:mm (comparables como texto). */
-function getInstitutionalNowStamp(): { ymd: string; hhmm: string } {
-  const hhmm = new Intl.DateTimeFormat('es-AR', {
-    timeZone: INSTITUTIONAL_TIMEZONE,
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).format(new Date());
-  return { ymd: getLocalDateString(), hhmm };
-}
-
-/**
- * Estado ELEMENTAL para mostrar: los estados gestionados a mano (pendiente/cancelada/
- * finalizada/en_curso) mandan; si la actividad está "confirmada", el chip se DERIVA de
- * los horarios reales: en curso dentro del rango, finalizada al pasar la hora de fin
- * (o el día anterior entero). Es solo visual: no cambia el estado persistido.
- */
-function getEffectiveStatus(act: ActivityItem): string {
-  const base = act.status || '';
-  if (base !== 'confirmada') return base;
-  const start = act.startTime || '';
-  const end = act.endTime || '';
-  const { ymd, hhmm } = getInstitutionalNowStamp();
-  if (act.date && act.date < ymd) return 'finalizada';
-  if (act.date === ymd && start && end) {
-    if (hhmm >= start && hhmm < end) return 'en_curso';
-    if (hhmm >= end) return 'finalizada';
-  }
-  return base;
 }
 
 const DAY_NAMES_FULL = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
@@ -322,8 +292,9 @@ export function AgendaSection({
   const totalCapacitaciones = activities.filter((a) => a.type === 'capacitacion').length;
   const totalSesiones = activities.filter((a) => a.type === 'evento').length;
   const totalCoordinacion = activities.filter((a) => a.type === 'reunion').length;
+  // Estimación cargada al agendar (sin visitas canceladas); no es asistencia confirmada.
   const totalAlumnos = activities
-    .filter((a) => a.type === 'visita')
+    .filter((a) => a.type === 'visita' && a.status !== 'cancelada')
     .reduce((acc, curr) => acc + (curr.attendeesCount || 0), 0);
 
   const visitsWithDuration = useMemo(() => {
@@ -790,7 +761,7 @@ export function AgendaSection({
           </div>
           <div className="mt-2 text-[11px] text-slate-500 flex items-center gap-1">
             <Users className="w-3 h-3 text-slate-400" />
-            <span>{totalAlumnos} alumnos en total en agenda</span>
+            <span>{totalAlumnos} alumnos estimados en agenda</span>
           </div>
         </div>
 
@@ -1125,7 +1096,9 @@ export function AgendaSection({
                   const dayActs = getActivitiesForDay(currentDayInfo.dateStr);
                   const dayVis = dayActs.filter((a) => a.type === 'visita').length;
                   const dayCap = dayActs.filter((a) => a.type === 'capacitacion').length;
-                  const dayTotalAtt = dayActs.reduce((acc, curr) => acc + (curr.attendeesCount || 0), 0);
+                  const dayTotalAtt = dayActs
+                    .filter((a) => a.status !== 'cancelada')
+                    .reduce((acc, curr) => acc + (curr.attendeesCount || 0), 0);
 
                   return (
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -1148,7 +1121,7 @@ export function AgendaSection({
                         </div>
                       </div>
                       <div className="bg-slate-50/80 rounded-lg p-3 border border-slate-200/70">
-                        <div className="text-[10px] uppercase font-bold text-slate-500">Asistentes Totales</div>
+                        <div className="text-[10px] uppercase font-bold text-slate-500" title="Estimación cargada al agendar (sin canceladas)">Asistentes Estimados</div>
                         <div className="text-lg font-black text-slate-800 mt-0.5">
                           {dayTotalAtt} personas
                         </div>
@@ -2221,7 +2194,7 @@ export function AgendaSection({
                           {res.format}
                         </span>
                         <span className="text-[10px] text-slate-400">
-                          {res.updatedAt ? `Act. ${res.updatedAt}` : 'Oficial'}
+                          {res.updatedAt ? `Act. ${formatResourceUpdatedAt(res)}` : 'Oficial'}
                         </span>
                       </div>
                       <div className="text-xs font-bold text-[#001428] group-hover:text-[#0284c7] transition-colors leading-snug">

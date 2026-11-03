@@ -122,6 +122,25 @@ export function formatDateDisplay(dateStr: string, options?: Intl.DateTimeFormat
   return `${w}, ${day} ${m}`;
 }
 
+/**
+ * Texto de "última actualización" de un recurso. Los recursos nuevos guardan la fecha (YYYY-MM-DD, hora
+ * institucional). Los anteriores guardaron la palabra "Hoy", que a los demás usuarios les mostraba
+ * "Actualizado: Hoy" para siempre: su fecha real se deduce del id (`res-<milisegundos>`).
+ */
+export function formatResourceUpdatedAt(res: { id: string; updatedAt?: string }): string {
+  const raw = (res.updatedAt || '').trim();
+  const show = (ymd: string) =>
+    formatDateDisplay(ymd, { day: 'numeric', month: 'short', year: 'numeric', timeZone: INSTITUTIONAL_TIMEZONE });
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return show(raw);
+  if (raw.toLowerCase() === 'hoy') {
+    const m = /^res-(\d{13})$/.exec(res.id);
+    if (!m) return 'sin fecha registrada';
+    const { year, month, day } = getInstitutionalTodayParts(new Date(Number(m[1])));
+    return show(`${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
+  }
+  return raw;
+}
+
 /** Codifica texto UTF-8 como Base64 estándar (sin usar el obsoleto unescape()). */
 export function utf8ToBase64(str: string): string {
   const bytes = new TextEncoder().encode(str);
@@ -470,6 +489,7 @@ export interface CsvActivityRow {
   institution?: string;
   level?: string;
   attendeesCount?: number | string;
+  attendeesActual?: number | string;
   status: string;
   description?: string;
 }
@@ -496,6 +516,7 @@ export function exportActivitiesToCsv(
     'Asistentes Estimados',
     'Estado',
     'Descripción',
+    'Asistentes Reales',
   ];
 
   const escapeCsv = (val: unknown) => {
@@ -518,6 +539,7 @@ export function exportActivitiesToCsv(
     escapeCsv(act.attendeesCount || ''),
     escapeCsv(act.status),
     escapeCsv(act.description || ''),
+    escapeCsv(act.attendeesActual ?? ''),
   ]);
 
   const csvContent = '﻿' + [headers.join(';'), ...rows.map((r) => r.join(';'))].join('\r\n');

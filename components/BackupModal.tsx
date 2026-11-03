@@ -200,7 +200,7 @@ export function BackupModal({ isOpen, onClose, onDataChanged }: BackupModalProps
             {isConfirmingImport ? (
               <div className="p-3 rounded bg-amber-50 border border-amber-200 space-y-2 text-amber-900">
                 <p className="text-xs font-semibold">
-                  Importar reemplazará los datos actuales de las secciones incluidas en el archivo. ¿Continuar?
+                  Importar reemplazará los datos de las secciones incluidas en el archivo, también en la base compartida: todos los usuarios verán el cambio, incluidas las cursadas si el archivo las trae. ¿Continuar?
                 </p>
                 <div className="flex items-center gap-2">
                   <button
@@ -233,7 +233,7 @@ export function BackupModal({ isOpen, onClose, onDataChanged }: BackupModalProps
             {isConfirmingReset ? (
               <div className="p-3 rounded bg-rose-50 border border-rose-200 space-y-2 text-rose-800">
                 <p className="text-xs font-semibold">
-                  ¿Seguro de restablecer todos los datos del Instituto a su estado original? Se borrarán actividades, novedades, cursos, recursos, equipo, ajustes y también las auditorías de cursadas (certificados y encuestas). Descarga un respaldo antes si lo necesitas.
+                  ¿Seguro de restablecer todos los datos del Instituto a su estado original? Se hará también en la base compartida, para todos los usuarios, y no se puede deshacer. Se borrarán actividades, novedades, cursos, recursos, equipo, ajustes y también las auditorías de cursadas (certificados y encuestas). Descarga un respaldo antes si lo necesitas.
                 </p>
                 <div className="flex items-center gap-2">
                   <button

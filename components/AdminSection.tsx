@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   ShieldCheck,
   Building2,
@@ -60,6 +60,7 @@ import { ConfirmationModal } from '@/components/ConfirmationModal';
 import {
   getInstitutionalSettings,
   saveInstitutionalSettings,
+  waitForInstitutionalSettingsSync,
   DEFAULT_SETTINGS,
   type InstitutionalSettings,
   type MetricGoalSettings,
@@ -74,6 +75,7 @@ import {
   saveActivity,
   getCourseAudits,
   getCourseCsatStats,
+  getTrainingResults,
   adminApproveCourseAudit,
   adminObserveCourseAudit,
   adminResetCourseAudit,
@@ -82,6 +84,8 @@ import { Reorder, useDragControls } from 'motion/react';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
 import { VISIT_LEVEL_OPTIONS } from './QuickActionsModal';
+import { computeTrainingMetrics, computeVisitMetrics, getActualAttendees, getMetricPeriodRef } from '@/lib/metrics';
+import { getLocalDateString } from '@/lib/utils';
 import {
   getAuthorizedUsers,
   getApprovalMode,
@@ -121,6 +125,21 @@ interface AdminSectionProps {
   onSettingsUpdated?: (settings: InstitutionalSettings) => void;
   onSetAnnouncementNewsId?: (id: string | null) => void;
   initialTab?: 'visitas' | 'objetivos' | 'auditoria_cursos' | 'cards_instituto' | 'institucional' | 'usuarios' | 'contenidos' | 'mantenimiento';
+}
+
+/**
+ * Aplica lo que llegó de la base solo en los campos que el usuario NO tocó desde la última lectura.
+ * Sin esto, cualquier cambio de datos (una cursada de un agente, una novedad) recargaba el formulario
+ * y borraba lo que el administrador estaba escribiendo sin guardar.
+ */
+function mergeUntouchedFields<T extends object>(base: T, draft: T, incoming: T): T {
+  const baseFields = base as unknown as Record<string, unknown>;
+  const draftFields = draft as unknown as Record<string, unknown>;
+  const result: Record<string, unknown> = { ...(incoming as unknown as Record<string, unknown>) };
+  for (const key of Object.keys(draftFields)) {
+    if (JSON.stringify(draftFields[key]) !== JSON.stringify(baseFields[key])) result[key] = draftFields[key];
+  }
+  return result as unknown as T;
 }
 
 const AVAILABLE_ICONS: { name: InstituteAreaIconName; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
@@ -314,6 +333,9 @@ export function AdminSection({
 
   const [settings, setSettings] = useState<InstitutionalSettings>(DEFAULT_SETTINGS);
   const [settingsSavedMessage, setSettingsSavedMessage] = useState<string | null>(null);
+  // TRUE cuando el último guardado de la configuración NO está confirmado por la base compartida.
+  const [settingsSavedIsWarning, setSettingsSavedIsWarning] = useState(false);
+  const settingsSyncToken = useRef(0);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // Confirmation Modals State (Eliminates browser window.confirm for iframe & mobile robustness)
@@ -344,22 +366,37 @@ export function AdminSection({
   const [auditFilter, setAuditFilter] = useState<'todos' | 'alertas' | 'consistentes' | 'aprobados'>('todos');
   const [auditSearch, setAuditSearch] = useState('');
 
+  // Última copia de la configuración leída de la base: permite distinguir lo que el usuario editó sin guardar.
+  const settingsBaseRef = useRef<InstitutionalSettings>(DEFAULT_SETTINGS);
+  const goalBaseRef = useRef<MetricGoalSettings>(DEFAULT_GOAL_SETTINGS);
+
   // Sincronización global con storage
   useEffect(() => {
-    setSettings(getInstitutionalSettings());
+    const initialSettings = getInstitutionalSettings();
+    const initialGoal = initialSettings.metricGoal || DEFAULT_GOAL_SETTINGS;
+    settingsBaseRef.current = initialSettings;
+    goalBaseRef.current = initialGoal;
+    setSettings(initialSettings);
     setAuthorizedUsers(getAuthorizedUsers());
     setApprovalModeState(getApprovalMode());
     setAreas(getInstituteAreas());
     setCourseAudits(getCourseAudits());
-    setGoalForm(getInstitutionalSettings().metricGoal || DEFAULT_GOAL_SETTINGS);
+    setGoalForm(initialGoal);
 
     const handleStorageChange = () => {
-      setSettings(getInstitutionalSettings());
+      const incomingSettings = getInstitutionalSettings();
+      const incomingGoal = incomingSettings.metricGoal || DEFAULT_GOAL_SETTINGS;
+      // Los formularios conservan lo que el administrador está escribiendo; el resto se actualiza en vivo.
+      const baseSettings = settingsBaseRef.current;
+      const baseGoal = goalBaseRef.current;
+      settingsBaseRef.current = incomingSettings;
+      goalBaseRef.current = incomingGoal;
+      setSettings((draft) => mergeUntouchedFields(baseSettings, draft, incomingSettings));
+      setGoalForm((draft) => mergeUntouchedFields(baseGoal, draft, incomingGoal));
       setAuthorizedUsers(getAuthorizedUsers());
       setApprovalModeState(getApprovalMode());
       setAreas(getInstituteAreas());
       setCourseAudits(getCourseAudits());
-      setGoalForm(getInstitutionalSettings().metricGoal || DEFAULT_GOAL_SETTINGS);
     };
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
@@ -395,6 +432,41 @@ export function AdminSection({
     setTimeout(() => setSuccessMessage(null), 3500);
   };
 
+  /**
+   * Informa el resultado de guardar la configuración institucional. El éxito solo se afirma cuando
+   * Firestore confirmó el envío; si no llegó (sin conexión, reglas) se avisa que quedó solo en este navegador.
+   */
+  const announceSettingsSaved = (confirmedText: string) => {
+    const token = ++settingsSyncToken.current;
+    const clearLater = (ms: number) =>
+      setTimeout(() => {
+        if (token !== settingsSyncToken.current) return;
+        setSuccessMessage(null);
+        setSettingsSavedMessage(null);
+        setSettingsSavedIsWarning(false);
+      }, ms);
+    setSuccessMessage(null);
+    setSettingsSavedIsWarning(false);
+    setSettingsSavedMessage('Guardado en este navegador. Confirmando el envío a la base compartida…');
+    void waitForInstitutionalSettingsSync().then((outcome) => {
+      if (token !== settingsSyncToken.current) return;
+      if (outcome === 'synced') {
+        setSuccessMessage(confirmedText);
+        setSettingsSavedMessage(confirmedText);
+        clearLater(5000);
+        return;
+      }
+      setSuccessMessage(null);
+      setSettingsSavedIsWarning(true);
+      setSettingsSavedMessage(
+        outcome === 'pending'
+          ? 'Se guardó en este navegador, pero todavía no llegó a la base compartida (¿sin conexión?). El cambio sigue en cola y se enviará cuando vuelva la conexión; mientras tanto los demás usuarios no lo ven.'
+          : 'Se guardó solo en este navegador: no se pudo enviar a la base compartida (revisa tu conexión o tus permisos). Se reintenta automáticamente; los demás usuarios no lo ven hasta entonces.'
+      );
+      clearLater(12000);
+    });
+  };
+
   const handleSaveSettings = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     try {
@@ -403,31 +475,10 @@ export function AdminSection({
       if (onSettingsUpdated) {
         onSettingsUpdated(saved);
       }
-      const msg = '¡Configuración institucional y pilares guardados y sincronizados correctamente con la sección Instituto y el pie de página!';
-      setSuccessMessage(msg);
-      setSettingsSavedMessage(msg);
-      setTimeout(() => {
-        setSuccessMessage(null);
-        setSettingsSavedMessage(null);
-      }, 5000);
+      announceSettingsSaved('¡Configuración institucional y pilares guardados y sincronizados con la sección Instituto y el pie de página!');
     } catch (err) {
       console.error('Error al guardar datos institucionales:', err);
     }
-  };
-
-  const handleResetSettings = () => {
-    setSettings(DEFAULT_SETTINGS);
-    const saved = saveInstitutionalSettings(DEFAULT_SETTINGS);
-    if (onSettingsUpdated) {
-      onSettingsUpdated(saved);
-    }
-    const msg = 'Se restauraron los datos institucionales predeterminados.';
-    setSuccessMessage(msg);
-    setSettingsSavedMessage(msg);
-    setTimeout(() => {
-      setSuccessMessage(null);
-      setSettingsSavedMessage(null);
-    }, 5000);
   };
 
   // --- GOAL METRICS HANDLERS ---
@@ -435,34 +486,23 @@ export function AdminSection({
 
   const handleSaveGoalSettings = (e: React.FormEvent) => {
     e.preventDefault();
-    const updated = {
-      ...settings,
-      metricGoal: goalForm,
-    };
-    setSettings(updated);
-    saveInstitutionalSettings(updated);
-    setSuccessMessage(
+    // Parte de lo ya guardado: los campos institucionales que se estén editando sin guardar no se publican.
+    saveInstitutionalSettings({ ...getInstitutionalSettings(), metricGoal: goalForm });
+    announceSettingsSaved(
       `¡Objetivo ${goalForm.period === 'anual' ? 'Anual' : 'Mensual'} de ${
         goalForm.metricType === 'visitas'
           ? 'Visitas Escolares'
           : goalForm.metricType === 'agentes'
           ? 'Agentes Formados'
           : 'Agentes y Visitas'
-      } guardado exitosamente!`
+      } guardado y sincronizado!`
     );
-    setTimeout(() => setSuccessMessage(null), 4000);
   };
 
   const handleResetGoalSettings = () => {
     setGoalForm(DEFAULT_GOAL_SETTINGS);
-    const updated = {
-      ...settings,
-      metricGoal: DEFAULT_GOAL_SETTINGS,
-    };
-    setSettings(updated);
-    saveInstitutionalSettings(updated);
-    setSuccessMessage('Se restablecieron los objetivos de carga predeterminados (1.750 agentes anuales).');
-    setTimeout(() => setSuccessMessage(null), 4000);
+    saveInstitutionalSettings({ ...getInstitutionalSettings(), metricGoal: DEFAULT_GOAL_SETTINGS });
+    announceSettingsSaved('Se restablecieron los objetivos de carga predeterminados (1.750 agentes anuales).');
   };
 
   // --- CARDS INSTITUTO HANDLERS ---
@@ -529,14 +569,8 @@ export function AdminSection({
     if (onSettingsUpdated) {
       onSettingsUpdated(saved);
     }
-    const msg = 'Se restauraron los datos institucionales predeterminados.';
-    setSuccessMessage(msg);
-    setSettingsSavedMessage(msg);
+    announceSettingsSaved('Se restauraron los datos institucionales predeterminados.');
     setIsResetSettingsConfirmOpen(false);
-    setTimeout(() => {
-      setSuccessMessage(null);
-      setSettingsSavedMessage(null);
-    }, 5000);
   };
 
   // --- VISITAS ESCOLARES HANDLERS ---
@@ -550,6 +584,9 @@ export function AdminSection({
   const totalAlumnosVisitas = schoolVisits
     .filter((v) => v.status !== 'cancelada')
     .reduce((sum, v) => sum + (v.attendeesCount || 0), 0);
+
+  // Asistencia REAL cargada al finalizar (las cifras de arriba son estimaciones del agendado).
+  const totalAlumnosAsistieron = schoolVisits.reduce((sum, v) => sum + (getActualAttendees(v) ?? 0), 0);
 
   const filteredVisits = useMemo(() => {
     return schoolVisits.filter((v) => {
@@ -653,28 +690,29 @@ export function AdminSection({
     });
   }, [courseAudits, auditFilter, auditSearch]);
 
-  // Live preview metrics for Goal setting
-  const liveAgentesFormados = useMemo(() => {
-    // Solo datos reales: asistentes cargados + cursadas digitales completadas y
-    // homologadas por Administración. Sin base histórica ni estimados ficticios
-    // (antes sumaba 1.260 fijos + 35 por curso, números de prueba).
-    const capacitacionAttendees = activities
-      .filter((a) => a.type === 'capacitacion' && a.status !== 'cancelada')
-      .reduce((sum, a) => sum + (a.attendeesCount || 0), 0);
-    const approvedAuditsCount = courseAudits.filter(
-      (audit) => !audit.isSample && (audit.auditStatus === 'aprobado_admin' || audit.certifiedAt)
-    ).length;
-    return capacitacionAttendees + approvedAuditsCount;
-  }, [activities, courseAudits]);
+  // Vista previa de metas: usa EXACTAMENTE el mismo cálculo que la portada (lib/metrics.ts),
+  // con el período que se esté editando en el formulario. Solo cuenta lo que realmente ocurrió:
+  // agentes con curso completo + reseña CSAT, y visitas ya finalizadas.
+  const liveMetrics = useMemo(() => {
+    const now = new Date();
+    const ref = getMetricPeriodRef(goalForm.period, now);
+    return {
+      training: computeTrainingMetrics(getTrainingResults(), ref, now),
+      visits: computeVisitMetrics(activities, ref, now),
+    };
+    // `courseAudits` no se lee acá, pero cambia cuando llegan o se modifican cursadas: fuerza el recálculo.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [courseAudits, activities, goalForm.period]);
 
-  const liveVisitasConfirmadas = confirmedVisitsCount;
+  const liveAgentesFormados = liveMetrics.training.agentesFormados;
+  const liveVisitasRealizadas = liveMetrics.visits.realizadas;
 
   const liveGoalPct = useMemo(() => {
     if (goalForm.metricType === 'visitas') {
-      return Math.min(100, Math.round((liveVisitasConfirmadas / Math.max(1, goalForm.targetVisitas)) * 100));
+      return Math.min(100, Math.round((liveVisitasRealizadas / Math.max(1, goalForm.targetVisitas)) * 100));
     }
     return Math.min(100, Math.round((liveAgentesFormados / Math.max(1, goalForm.targetAgentes)) * 100));
-  }, [goalForm, liveAgentesFormados, liveVisitasConfirmadas]);
+  }, [goalForm, liveAgentesFormados, liveVisitasRealizadas]);
 
   const pendingUsersCount = authorizedUsers.filter((u) => u.status === 'pendiente').length;
   const approvedUsersCount = authorizedUsers.filter((u) => u.status === 'aprobado').length;
@@ -899,7 +937,13 @@ export function AdminSection({
                 >
                   <div className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500">Total Solicitudes</div>
                   <div className="text-2xl font-black text-[#001428] mt-1">{schoolVisits.length}</div>
-                  <div className="text-[10px] text-slate-500 mt-0.5">{totalAlumnosVisitas} alumnos totales</div>
+                  <div
+                    className="text-[10px] text-slate-500 mt-0.5"
+                    title="Estimado al agendar (sin canceladas). La asistencia real se carga al editar cada visita ya realizada."
+                  >
+                    {totalAlumnosVisitas} alumnos estimados
+                    {totalAlumnosAsistieron > 0 ? ` • ${totalAlumnosAsistieron} asistieron` : ''}
+                  </div>
                 </div>
 
                 <div
@@ -1390,9 +1434,9 @@ export function AdminSection({
                       </div>
                       <div className="p-2 bg-slate-900/60 rounded border border-slate-800">
                         <div className="text-xl font-black text-white">
-                          {liveVisitasConfirmadas}
+                          {liveVisitasRealizadas}
                         </div>
-                        <div className="text-[10px] text-slate-300 mt-0.5">Visitas confirmadas</div>
+                        <div className="text-[10px] text-slate-300 mt-0.5">Visitas realizadas</div>
                         <div className="text-[9px] text-slate-400">Meta: {goalForm.targetVisitas} visitas</div>
                       </div>
                     </div>
@@ -1420,7 +1464,7 @@ export function AdminSection({
                       <div className="text-[10px] text-slate-400 flex items-center justify-between">
                         <span>
                           {goalForm.metricType === 'visitas'
-                            ? `${liveVisitasConfirmadas} de ${goalForm.targetVisitas} visitas realizadas`
+                            ? `${liveVisitasRealizadas} de ${goalForm.targetVisitas} visitas realizadas`
                             : `${liveAgentesFormados.toLocaleString('es-AR')} de ${goalForm.targetAgentes.toLocaleString('es-AR')} capacitados`}
                         </span>
                         <span className="text-sky-300 font-semibold">{liveGoalPct}%</span>
@@ -2026,9 +2070,18 @@ export function AdminSection({
 
               {/* Mensaje de Confirmación Inmediato dentro de la pestaña */}
               {settingsSavedMessage && (
-                <div className="p-3.5 bg-emerald-50 border border-emerald-300 rounded-xl text-emerald-900 text-xs font-semibold flex items-center justify-between gap-2 shadow-2xs animate-in fade-in">
+                <div
+                  role="status"
+                  className={`p-3.5 border rounded-xl text-xs font-semibold flex items-center justify-between gap-2 shadow-2xs animate-in fade-in ${
+                    settingsSavedIsWarning ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                  }`}
+                >
                   <div className="flex items-center gap-2.5">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    {settingsSavedIsWarning ? (
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    )}
                     <span>{settingsSavedMessage}</span>
                   </div>
                   <button
@@ -2041,6 +2094,25 @@ export function AdminSection({
                   </button>
                 </div>
               )}
+
+              {(() => {
+                const missing = [
+                  !settings.address?.trim() && 'dirección',
+                  !settings.city?.trim() && 'ciudad',
+                  !settings.contactEmail?.trim() && 'correo de contacto',
+                  !settings.phone?.trim() && 'teléfono',
+                  !settings.receptionExtension?.trim() && 'interno de recepción',
+                  !settings.techSupportExtension?.trim() && 'interno de soporte técnico',
+                  !settings.operatingHours?.trim() && 'horario de atención',
+                ].filter((x): x is string => typeof x === 'string');
+                if (missing.length === 0) return null;
+                return (
+                  <div className="p-3 rounded-lg border border-amber-200 bg-amber-50 text-amber-900 text-xs leading-relaxed">
+                    <strong>Faltan datos de contacto:</strong> {missing.join(', ')}. Mientras estén vacíos no se muestran en el pie
+                    de página ni en la sección Instituto. Cárgalos y guarda para que los vean todos los usuarios.
+                  </div>
+                );
+              })()}
 
               {/* Grupos de Campos del Formulario */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -2107,7 +2179,7 @@ export function AdminSection({
                       value={settings.address}
                       onChange={(e) => setSettings({ ...settings, address: e.target.value })}
                       className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 bg-white focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
-                      placeholder="Palacio Legislativo - Anexo Rivadavia, Av. Rivadavia 1864, Piso 3°"
+                      placeholder="Calle, número y piso de la sede"
                     />
                   </div>
 
@@ -2120,7 +2192,7 @@ export function AdminSection({
                       value={settings.city || ''}
                       onChange={(e) => setSettings({ ...settings, city: e.target.value })}
                       className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 bg-white focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
-                      placeholder="Ciudad Autónoma de Buenos Aires"
+                      placeholder="Ciudad o jurisdicción"
                     />
                   </div>
 
@@ -2133,7 +2205,7 @@ export function AdminSection({
                       value={settings.operatingHours}
                       onChange={(e) => setSettings({ ...settings, operatingHours: e.target.value })}
                       className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 bg-white focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
-                      placeholder="Lunes a Viernes de 08:00 a 18:00 hs"
+                      placeholder="Días y horario de atención"
                     />
                   </div>
                 </div>
@@ -2154,7 +2226,7 @@ export function AdminSection({
                       value={settings.contactEmail}
                       onChange={(e) => setSettings({ ...settings, contactEmail: e.target.value })}
                       className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 bg-white focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
-                      placeholder="contacto@instituto.legislatura.gob.ar"
+                      placeholder="correo@dominio"
                     />
                   </div>
 
@@ -2167,7 +2239,7 @@ export function AdminSection({
                       value={settings.phone || ''}
                       onChange={(e) => setSettings({ ...settings, phone: e.target.value })}
                       className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 bg-white focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
-                      placeholder="Conmutador: (011) 4370-7100"
+                      placeholder="Número de teléfono o conmutador"
                     />
                   </div>
 
@@ -2181,7 +2253,7 @@ export function AdminSection({
                         value={settings.receptionExtension}
                         onChange={(e) => setSettings({ ...settings, receptionExtension: e.target.value })}
                         className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 bg-white focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
-                        placeholder="int. 4022"
+                        placeholder="Número de interno"
                       />
                     </div>
                     <div>
@@ -2193,7 +2265,7 @@ export function AdminSection({
                         value={settings.techSupportExtension}
                         onChange={(e) => setSettings({ ...settings, techSupportExtension: e.target.value })}
                         className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 bg-white focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
-                        placeholder="int. 4108"
+                        placeholder="Número de interno"
                       />
                     </div>
                   </div>
@@ -2271,10 +2343,11 @@ export function AdminSection({
                             Seleccionar comunicado (solo uno activo):
                           </label>
                           <select
-                            value={news.find((n) => n.isAnnouncement)?.id || news[0]?.id || ''}
+                            value={news.find((n) => n.isAnnouncement)?.id ?? ''}
                             onChange={(e) => onSetAnnouncementNewsId?.(e.target.value || null)}
                             className="w-full text-xs py-2 px-2.5 rounded-lg border border-slate-300 bg-white font-medium text-[#001428] focus:ring-1 focus:ring-[#0284c7] focus:outline-none truncate"
                           >
+                            <option value="">Ningún comunicado seleccionado</option>
                             {news.map((item) => (
                               <option key={item.id} value={item.id}>
                                 [{item.category}] {item.title}
@@ -2549,8 +2622,8 @@ export function AdminSection({
               <div className="flex flex-col-reverse sm:flex-row items-center justify-between gap-3 pt-4 border-t border-slate-200">
                 <div className="text-[11px] text-slate-500">
                   {settingsSavedMessage ? (
-                    <span className="text-emerald-700 font-bold flex items-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span className={`${settingsSavedIsWarning ? 'text-amber-700' : 'text-emerald-700'} font-bold flex items-center gap-1.5`}>
+                      {settingsSavedIsWarning ? <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> : <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />}
                       {settingsSavedMessage}
                     </span>
                   ) : (
@@ -2847,10 +2920,10 @@ export function AdminSection({
       <ConfirmationModal
         isOpen={isResetSettingsConfirmOpen}
         title="Restablecer Datos Institucionales"
-        description="Se restablecerán todos los datos del Instituto (nombre, sede, correo, conmutador, horarios, copyright y las 3 tarjetas de pilares: Misión, Objetivos y Principios) a sus valores predeterminados oficiales."
-        confirmLabel="Restaurar Predeterminado"
+        description="Se borrarán de la base compartida la dirección, ciudad, horario, correo, teléfono e internos (los demás usuarios dejarán de verlos). También se restablecen a los textos predeterminados el nombre, el subtítulo, el copyright y las tarjetas de Misión, Objetivos y Principios, y se reinician la meta de métricas y el aviso interno. Esta acción no se puede deshacer."
+        confirmLabel="Restablecer"
         cancelLabel="Cancelar"
-        isDestructive={false}
+        isDestructive
         onConfirm={handleConfirmResetSettings}
         onCancel={() => setIsResetSettingsConfirmOpen(false)}
       />
@@ -2916,8 +2989,12 @@ export function EditVisitModalForm({
   const [startTime, setStartTime] = useState(visit.startTime);
   const [endTime, setEndTime] = useState(visit.endTime);
   const [attendees, setAttendees] = useState(visit.attendeesCount ? String(visit.attendeesCount) : '');
+  const [attendeesActual, setAttendeesActual] = useState(
+    typeof visit.attendeesActual === 'number' ? String(visit.attendeesActual) : ''
+  );
+  // La asistencia real solo tiene sentido desde el día de la visita en adelante.
+  const canLoadActualAttendance = visit.date <= getLocalDateString() || typeof visit.attendeesActual === 'number';
   const [responsible, setResponsible] = useState(visit.responsible || '');
-  const [location, setLocation] = useState(visit.location || 'Recinto de Sesiones y Salón de Pasos Perdidos');
   const [contactEmail, setContactEmail] = useState(visit.contactEmail || '');
   const [contactPhone, setContactPhone] = useState(visit.contactPhone || '');
   const [notes, setNotes] = useState(visit.notes || '');
@@ -2931,6 +3008,8 @@ export function EditVisitModalForm({
 
     const parsedCount = parseInt(attendees, 10);
     const validCount = !isNaN(parsedCount) && parsedCount > 0 ? parsedCount : undefined;
+    const parsedActual = parseInt(attendeesActual, 10);
+    const validActual = !isNaN(parsedActual) && parsedActual >= 0 ? parsedActual : undefined;
 
     const updated: ActivityItem = {
       ...visit,
@@ -2941,8 +3020,8 @@ export function EditVisitModalForm({
       startTime,
       endTime,
       attendeesCount: validCount,
-      responsible: responsible.trim() || 'Coordinación del Instituto',
-      location: location.trim(),
+      attendeesActual: validActual,
+      responsible: responsible.trim(),
       contactEmail: contactEmail.trim() || undefined,
       contactPhone: contactPhone.trim() || undefined,
       notes: notes.trim() || undefined,
@@ -3054,7 +3133,7 @@ export function EditVisitModalForm({
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-bold text-[#001428] mb-1">Cantidad de Alumnos</label>
+              <label className="block text-xs font-bold text-[#001428] mb-1">Cantidad de Alumnos (estimada)</label>
               <input
                 type="number"
                 min="1"
@@ -3065,13 +3144,31 @@ export function EditVisitModalForm({
                 className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
               />
             </div>
+            {canLoadActualAttendance && (
+              <div>
+                <label className="block text-xs font-bold text-[#001428] mb-1">Alumnos que asistieron (real)</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="250"
+                  value={attendeesActual}
+                  onChange={(e) => setAttendeesActual(e.target.value)}
+                  placeholder="Completar al finalizar"
+                  className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  Es la cifra que cuenta en las métricas de &quot;alumnos recibidos&quot;.
+                </p>
+              </div>
+            )}
             <div>
-              <label className="block text-xs font-bold text-[#001428] mb-1">Guía / Responsable</label>
+              <label className="block text-xs font-bold text-[#001428] mb-1">Guía / Responsable *</label>
               <input
                 type="text"
+                required
                 value={responsible}
                 onChange={(e) => setResponsible(e.target.value)}
-                placeholder="Coordinación del Instituto"
+                placeholder="Persona o área a cargo de la visita"
                 className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none font-medium"
               />
             </div>

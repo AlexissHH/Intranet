@@ -9,7 +9,10 @@ export interface ActivityItem {
   endTime: string; // HH:mm
   location: string;
   responsible: string;
+  /** Cantidad ESTIMADA de asistentes, cargada al agendar. No es asistencia confirmada. */
   attendeesCount?: number;
+  /** Asistentes REALES, cargados por Administración una vez realizada la actividad. */
+  attendeesActual?: number;
   institution?: string; // Para visitas escolares
   level?: string; // Nivel primario, secundario, etc.
   description: string;
@@ -94,6 +97,11 @@ export interface AgentCourseAudit {
   durationHours: number;
   agentName: string;
   agentEmail: string;
+  /**
+   * uid de Firebase del agente (opcional). Lo escribe el propio agente al cursar; permite publicar su resultado
+   * anónimo en `training_results` y contar "personas distintas" sin exponer su email (ver TrainingResult).
+   */
+  agentUid?: string;
   agentArea: string;
   checks: CourseModuleCheck[];
   totalModules: number;
@@ -105,11 +113,31 @@ export interface AgentCourseAudit {
   auditStatus: 'en_progreso' | 'consistente' | 'alerta_simultanea' | 'aprobado_admin' | 'observado';
   auditVerdict: string;
   csatRating?: 'Muy Satisfecho' | 'Satisfecho' | 'Neutral' | 'Insatisfecho';
+  /** Momento (epoch ms) en que el agente dejó su reseña CSAT; define cuándo quedó formado. */
+  csatSubmittedAt?: number;
   csatComment?: string;
   certifiedAt?: string;
   adminNotes?: string;
   /** Registro de ejemplo (demostración): no cuenta en estadísticas ni en métricas reales. */
   isSample?: boolean;
+}
+
+/**
+ * Resultado ANÓNIMO de una cursada terminada (colección `training_results`, id = id de la cursada).
+ * Lo leen todos los usuarios aprobados para las cifras de Inicio y el índice CSAT: no contiene nombre, email,
+ * área, comentario ni título del curso. `personKey` es un identificador opaco (el uid de Firebase) que solo
+ * sirve para contar personas distintas. Las cursadas completas (con nombre y comentarios) quedan en
+ * `course_audits`, visibles solo para el propio agente y para Administración.
+ */
+export interface TrainingResult {
+  id: string;
+  courseId: string;
+  personKey: string;
+  /** Momento (epoch ms) en que la cursada quedó cerrada (ver getAuditClosedAt en lib/metrics.ts). */
+  closedAt: number;
+  csatRating: 'Muy Satisfecho' | 'Satisfecho' | 'Neutral' | 'Insatisfecho';
+  /** Cursada que acredita a la persona como formada (ver isAuditFormado en lib/metrics.ts). */
+  formado: boolean;
 }
 
 export interface ProjectProgram {

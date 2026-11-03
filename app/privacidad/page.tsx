@@ -24,7 +24,7 @@ export default function PrivacidadPage() {
             Instituto de Capacitación Legislativa — Poder Legislativo
           </p>
           <p className="text-xs text-slate-500">
-            Versión: 1.0 · Última actualización: Octubre 2026 · Aplica al sistema interno de
+            Versión: 1.1 · Última actualización: Noviembre 2026 · Aplica al sistema interno de
             gestión institucional (la &quot;Intranet&quot;) y a su encuesta pública de satisfacción.
           </p>
         </header>
@@ -146,6 +146,13 @@ export default function PrivacidadPage() {
             <li>
               <strong>Alojamiento de la aplicación:</strong> proveedor de hosting en la nube
               (p. ej. Netlify/Vercel) que sirve la aplicación.
+            </li>
+            <li>
+              <strong>Copias de respaldo:</strong> el administrador puede descargar un archivo
+              JSON con los datos de la Intranet, que incluye el directorio del equipo y las
+              auditorías de cursadas (con nombres, correos y comentarios). Ese archivo queda
+              fuera de la base compartida y de sus reglas de seguridad: es responsabilidad de
+              quien lo descarga resguardarlo y eliminarlo cuando deje de ser necesario.
             </li>
           </ul>
         </section>

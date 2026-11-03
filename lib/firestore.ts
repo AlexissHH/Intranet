@@ -19,15 +19,19 @@
 import { getApp, getApps, type FirebaseApp } from 'firebase/app';
 import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
 import defaultFirebaseConfig from '../firebase-applet-config.json';
+import { changedFields, docHash, fieldHashes, type FieldHashes } from './sync-merge';
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
   getDocs,
   getFirestore,
   onSnapshot,
+  query,
   setDoc,
+  where,
   writeBatch,
   type Firestore,
   type Unsubscribe,
@@ -97,6 +101,29 @@ export function registerGateOpenHandler(handler: () => void): void {
 
 export function isSyncGateOpen(): boolean {
   return syncGateOpen;
+}
+
+/**
+ * Quién tiene la sesión abierta (lo fija lib/auth.ts junto con el gate). Algunas colecciones (course_audits)
+ * solo se pueden leer filtradas por el propio email: con reglas de producción una consulta sin ese filtro
+ * se rechaza entera.
+ */
+export interface SyncIdentity {
+  email: string;
+  isAdmin: boolean;
+  /** uid de Firebase de la sesión (solo con sesión de Firebase; las cuentas institucionales no lo tienen). */
+  uid?: string;
+}
+let syncIdentity: SyncIdentity | null = null;
+
+export function setSyncIdentity(identity: SyncIdentity | null): void {
+  syncIdentity = identity
+    ? { email: identity.email.trim().toLowerCase(), isAdmin: identity.isAdmin, ...(identity.uid ? { uid: identity.uid } : {}) }
+    : null;
+}
+
+export function getSyncIdentity(): SyncIdentity | null {
+  return syncIdentity;
 }
 
 /** Abre/cierra el gate de sincronización (lo llama lib/auth.ts con la sesión real). */
@@ -197,15 +224,6 @@ export function ensureFirebaseApp(): FirebaseApp | null {
 /* ────────────────────────── Estado interno para diffs ────────────────────────── */
 
 /**
- * Por colección: último contenido conocido (local + snapshot remoto) serializado por ID,
- * para calcular qué documentos cambió al leer una lista nueva y no reescribir todo a Firestore.
- */
-interface CollectionTracker {
-  known: Map<string, string>;
-  bootstrapped: boolean;
-}
-
-/**
  * Claves cuyo último push FALLÓ (ej. Security Rules sin publicar). Mientras exista falla,
  * la data local (más reciente y del usuario) no se ve revertida por snapshots viejos.
  * Se limpia al primer push exitoso.
@@ -239,23 +257,168 @@ export function hasActivePushFailure(key: string): boolean {
   return failedPushes.has(key);
 }
 
+/**
+ * Los envíos fallidos de DOCUMENTOS INDIVIDUALES (clave "coleccion/documento", ej. settings/app) se
+ * recuerdan entre recargas: si no, un cambio que no llegó a Firestore se pisaría con la copia
+ * remota al volver a abrir la página. Las colecciones no lo necesitan: se deducen comparando la
+ * copia local con el último estado sincronizado (ver lib/sync-merge.ts).
+ */
+const DIRTY_STORAGE_KEY = 'icl_intranet_sync_dirty_v1';
+/** Claves con un envío fallido de una sesión ANTERIOR, todavía sin reintentar. */
+const staleFailures = new Set<string>();
+
+function persistDirtyKeys(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const keys = [...failedPushes.keys()].filter((k) => k.includes('/'));
+    if (keys.length === 0) localStorage.removeItem(DIRTY_STORAGE_KEY);
+    else localStorage.setItem(DIRTY_STORAGE_KEY, JSON.stringify(keys));
+  } catch {
+    // Sin almacenamiento disponible: queda solo el recordatorio en memoria.
+  }
+}
+
+function restoreDirtyKeys(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = localStorage.getItem(DIRTY_STORAGE_KEY);
+    const keys: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(keys)) return;
+    for (const k of keys) {
+      if (typeof k === 'string' && k.includes('/')) {
+        failedPushes.set(k, 0);
+        staleFailures.add(k);
+      }
+    }
+  } catch {
+    // Dato dañado: se ignora.
+  }
+}
+restoreDirtyKeys();
+
+/** TRUE (una sola vez) si el envío de `key` falló en una sesión anterior: hay que reintentarlo ahora. */
+export function consumeStaleFailure(key: string): boolean {
+  return staleFailures.delete(key);
+}
+
 function markPushFailure(key: string): void {
   failedPushes.set(key, Date.now());
+  staleFailures.delete(key);
+  if (key.includes('/')) persistDirtyKeys();
 }
 
 function clearPushFailure(key: string): void {
   failedPushes.delete(key);
+  staleFailures.delete(key);
+  if (key.includes('/')) persistDirtyKeys();
 }
+
+/**
+ * DOCUMENTOS INDIVIDUALES: huella de cada CAMPO del último contenido SINCRONIZADO (local == servidor) de
+ * cada documento, guardada en localStorage. Con ella, tras una recarga se detecta qué campos tienen un
+ * cambio que Firestore todavía no recibió (por ejemplo, un guardado sin conexión) y no se los pisa con la
+ * versión remota; y cada guardado envía solo los campos que cambiaron (ver `lib/sync-merge.ts`).
+ */
+const SINGLE_KNOWN_STORAGE_KEY = 'icl_intranet_sync_doc_fields_v1';
+
+function readSingleKnown(): Record<string, FieldHashes> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(SINGLE_KNOWN_STORAGE_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, FieldHashes> = {};
+    for (const [docKey, fields] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!fields || typeof fields !== 'object' || Array.isArray(fields)) continue;
+      const clean: FieldHashes = {};
+      for (const [f, h] of Object.entries(fields as Record<string, unknown>)) {
+        if (typeof h === 'string') clean[f] = h;
+      }
+      out[docKey] = clean;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function getSingleKnown(key: string): FieldHashes | null {
+  return readSingleKnown()[key] ?? null;
+}
+
+function setSingleKnown(key: string, fields: FieldHashes): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(SINGLE_KNOWN_STORAGE_KEY, JSON.stringify({ ...readSingleKnown(), [key]: fields }));
+  } catch {
+    // Sin almacenamiento disponible: se pierde solo la protección tras una recarga.
+  }
+}
+
+/** Último valor que se quiso publicar de cada documento: un reintento envía el actual, no uno ya viejo. */
+const latestSingleValue = new Map<string, unknown>();
+
+/**
+ * Por colección: huella (hash) de cada documento en el último estado SINCRONIZADO (local == servidor),
+ * para calcular qué documentos cambiaron y no reescribir todo a Firestore. Con `persistKey` ese
+ * estado también se guarda en localStorage, de modo que sobreviva a una recarga y permita detectar
+ * borrados remotos y cambios locales sin enviar (ver lib/sync-merge.ts).
+ */
+interface CollectionTracker {
+  known: Map<string, string>;
+  bootstrapped: boolean;
+  /** TRUE cuando `known` refleja un estado confirmado con el servidor (snapshot o envío exitoso). */
+  synced: boolean;
+  /** Clave de localStorage de la copia local de esta colección (null: no se persiste el estado). */
+  persistKey: string | null;
+}
+
+const KNOWN_STORAGE_PREFIX = 'icl_intranet_sync_known_v1:';
 
 const trackers = new Map<string, CollectionTracker>();
 
 function getTracker(name: string): CollectionTracker {
   let t = trackers.get(name);
   if (!t) {
-    t = { known: new Map(), bootstrapped: false };
+    t = { known: new Map(), bootstrapped: false, synced: false, persistKey: null };
     trackers.set(name, t);
   }
   return t;
+}
+
+/** Activa la persistencia del estado sincronizado de `name`, ligada a la clave local `localKey`. */
+export function registerCollectionPersistence(name: string, localKey: string): void {
+  getTracker(name).persistKey = localKey;
+}
+
+function persistKnown(tracker: CollectionTracker): void {
+  if (!tracker.persistKey || typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(KNOWN_STORAGE_PREFIX + tracker.persistKey, JSON.stringify(Object.fromEntries(tracker.known)));
+  } catch {
+    // Sin espacio: el próximo snapshot trata la colección como primera sincronización (comportamiento histórico).
+  }
+}
+
+/** Estado sincronizado guardado en una sesión anterior; null si no existe o si la copia local ya no existe. */
+function loadPersistedKnown(tracker: CollectionTracker): Map<string, string> | null {
+  if (!tracker.persistKey || typeof window === 'undefined') return null;
+  try {
+    // Sin copia local no hay nada que comparar: nunca se deduce un borrado de una copia ausente.
+    if (localStorage.getItem(tracker.persistKey) === null) return null;
+    const raw = localStorage.getItem(KNOWN_STORAGE_PREFIX + tracker.persistKey);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const known = new Map<string, string>();
+    for (const [id, hash] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof hash !== 'string') return null;
+      known.set(id, hash);
+    }
+    return known;
+  } catch {
+    return null;
+  }
 }
 
 function docBytes(id: string, data: Record<string, unknown>): number {
@@ -308,10 +471,17 @@ export async function pushCollectionDiff(
       reportError(
         `Un registro de "${name}" supera el límite de 1 MB por documento y se omitió al sincronizar.`
       );
+      // Demasiado grande para enviarlo, pero NO está borrado: se conserva su huella conocida para
+      // que no se interprete como una baja y se elimine la versión que sí está en Firestore.
+      const knownHash = tracker.known.get(id);
+      if (knownHash !== undefined) serialized.set(id, knownHash);
       continue;
     }
-    serialized.set(id, JSON.stringify(item));
-    if (tracker.known.get(id) !== JSON.stringify(item)) {
+    // Huella del contenido (no del texto JSON): el orden de las claves o el campo interno
+    // `__id` no deben hacer que un documento sin cambios se vuelva a escribir.
+    const hash = docHash(item);
+    serialized.set(id, hash);
+    if (tracker.known.get(id) !== hash) {
       toWrite.push({ id, data: item });
     }
   }
@@ -351,6 +521,8 @@ export async function pushCollectionDiff(
 
   if (ok) {
     tracker.known = serialized;
+    tracker.synced = true;
+    persistKnown(tracker);
     clearPushFailure(name);
     cancelPushRetry(name);
     reportReady();
@@ -393,12 +565,16 @@ export async function replaceCollection(
       ops++;
     }
     if (ops > 0) await batch.commit();
+    // Solo si el reemplazo se confirmó: el estado sincronizado pasa a ser exactamente `items`.
+    const tracker = getTracker(name);
+    tracker.known = new Map(items.filter((i) => idOf(i)).map((i) => [idOf(i), docHash(i)]));
+    tracker.synced = true;
+    persistKnown(tracker);
     reportReady();
   } catch (e) {
     markPushFailure(name);
     reportSyncError(e, name, 'escritura');
   }
-  getTracker(name).known = new Map(items.map((i) => [idOf(i), JSON.stringify(i)]));
 }
 
 /**
@@ -408,14 +584,25 @@ export async function replaceCollection(
  * RESILIENCIA: si el listener muere (p. ej. reglas recién publicadas, corte de red),
  * se re-suscribe SOLO cada 60 s en vez de quedar sordo para siempre.
  */
+export interface CollectionSnapshotInfo {
+  /** Los datos vienen de la caché local del SDK (sin confirmar con el servidor): no sirven para deducir borrados. */
+  fromCache: boolean;
+  /** Último estado sincronizado conocido (id → huella) ANTES de este snapshot; null en la primera sincronización. */
+  previousKnown: Map<string, string> | null;
+}
+
 export function subscribeToCollection(
   name: string,
-  onItems: (items: Record<string, unknown>[]) => void
+  onItems: (items: Record<string, unknown>[], info: CollectionSnapshotInfo) => void,
+  /** Si se indica, solo se escuchan los documentos cuyo `field` es igual a `value` (lectura restringida por reglas). */
+  onlyWhere?: { field: string; value: string }
 ): Unsubscribe | null {
   if (!isSyncGateOpen()) return null;
   const database = getIntranetDb();
   if (!database) return null;
-  const ref = collection(database, name);
+  const ref = onlyWhere
+    ? query(collection(database, name), where(onlyWhere.field, '==', onlyWhere.value))
+    : collection(database, name);
   const tracker = getTracker(name);
 
   let activeUnsub: Unsubscribe | null = null;
@@ -429,14 +616,37 @@ export function subscribeToCollection(
       ref,
       (snap) => {
         if (!isSyncGateOpen()) return;
+        const fromCache = snap.metadata.fromCache;
         const items = snap.docs.map((d) => ({
           ...(d.data() as Record<string, unknown>),
           __id: d.id,
         }));
-        tracker.known = new Map(items.map((i) => [i.__id as string, JSON.stringify({ ...i, __id: undefined })]));
+        // Un snapshot VACÍO que sale de la caché (ej. arranque sin conexión) no dice nada del servidor:
+        // si se tomara como "la colección está vacía" se borrarían datos locales válidos.
+        if (fromCache && items.length === 0) return;
+        const previousKnown = tracker.synced ? new Map(tracker.known) : loadPersistedKnown(tracker);
+        // Un documento con escritura local PENDIENTE (aún sin confirmar por el servidor) aparece en el
+        // snapshot con nuestro cambio: no es un estado sincronizado. Si se lo anotara como conocido,
+        // tras una recarga se lo tomaría por "ya enviado" y se perdería. Conserva la huella anterior.
+        const pendingIds = new Set(snap.docs.filter((d) => d.metadata.hasPendingWrites).map((d) => d.id));
+        const nextKnown = new Map<string, string>();
+        for (const item of items) {
+          const id = item.__id as string;
+          if (!pendingIds.has(id)) {
+            nextKnown.set(id, docHash(item));
+            continue;
+          }
+          const prior = previousKnown?.get(id);
+          if (prior !== undefined) nextKnown.set(id, prior);
+        }
+        tracker.known = nextKnown;
         tracker.bootstrapped = true;
+        if (!fromCache) {
+          tracker.synced = true;
+          persistKnown(tracker);
+        }
         reportReady();
-        onItems(items);
+        onItems(items, { fromCache, previousKnown });
       },
       (err) => {
         if (!isSyncGateOpen()) return;
@@ -472,20 +682,56 @@ export function isBootstrapped(name: string): boolean {
 
 /* ─────────────────────── Documentos individuales (settings/meta) ─────────────────────── */
 
-/** Publica un objeto en un documento individual (ej. settings/app). */
-export async function pushSingleDoc(col: string, docId: string, value: unknown): Promise<void> {
+/**
+ * Publica un objeto en un documento individual (ej. settings/app).
+ *  - Por defecto reemplaza el documento completo (comportamiento histórico).
+ *  - Con `perField` envía SOLO los campos que cambiaron respecto de lo último sincronizado (y quita los que
+ *    se eliminaron), sin tocar los demás: un cambio de otro administrador en otro campo no se pisa.
+ *    Si no hay estado sincronizado todavía, envía todos los campos sin borrar los que solo existan en remoto.
+ */
+export async function pushSingleDoc(
+  col: string,
+  docId: string,
+  value: unknown,
+  options?: { quiet?: boolean; perField?: boolean }
+): Promise<boolean> {
   const database = getIntranetDb();
-  if (!database) return;
+  if (!database) return false;
   const key = `${col}/${docId}`;
+  latestSingleValue.set(key, value);
   try {
-    await setDoc(doc(database, col, docId), sanitizeForFirestore(value as Record<string, unknown>));
+    const data = sanitizeForFirestore(value as Record<string, unknown>);
+    if (options?.perField) {
+      const current = fieldHashes(data);
+      const known = getSingleKnown(key);
+      const { changed, removed } = known ? changedFields(current, known) : { changed: Object.keys(current), removed: [] };
+      if (changed.length > 0 || removed.length > 0) {
+        const payload: Record<string, unknown> = {};
+        for (const f of changed) payload[f] = data[f];
+        for (const f of removed) payload[f] = deleteField();
+        await setDoc(doc(database, col, docId), payload, { merge: true });
+      }
+      // Solo se da por sincronizado lo que se envió; el resto lo actualiza el próximo snapshot.
+      const nextKnown: FieldHashes = { ...(known ?? {}) };
+      for (const f of changed) nextKnown[f] = current[f];
+      for (const f of removed) delete nextKnown[f];
+      setSingleKnown(key, nextKnown);
+    } else {
+      await setDoc(doc(database, col, docId), data);
+      setSingleKnown(key, fieldHashes(data));
+    }
     clearPushFailure(key);
     cancelPushRetry(key);
     reportReady();
+    return true;
   } catch (e) {
+    // Publicación inicial de un documento que todavía no existe: si la cuenta no puede escribir, no es un
+    // error ni se reintenta (marcarlo como fallo haría ignorar luego lo que publique un administrador).
+    if (options?.quiet) return false;
     markPushFailure(key);
-    schedulePushRetry(key, () => pushSingleDoc(col, docId, value));
+    schedulePushRetry(key, () => pushSingleDoc(col, docId, latestSingleValue.get(key) ?? value, options));
     reportSyncError(e, col, 'escritura');
+    return false;
   }
 }
 
@@ -506,10 +752,19 @@ export async function deleteSingleDoc(col: string, docId: string): Promise<void>
 
 /** Escucha un documento individual; `exists` permite sembrar si aún no existe.
  *  Misma resiliencia que las colecciones: re-suscripción automática tras cada error. */
+export interface SingleDocSnapshotInfo {
+  /** Los datos vienen de la caché local del SDK (sin confirmar con el servidor): no sirven para deducir nada. */
+  fromCache: boolean;
+  /** Huella de cada campo en el último contenido sincronizado; null si es la primera sincronización. */
+  knownFields: FieldHashes | null;
+  /** Huella del contenido remoto; null si el documento no existe. */
+  remoteHash: string | null;
+}
+
 export function subscribeToSingleDoc(
   col: string,
   docId: string,
-  onValue: (value: unknown, exists: boolean) => void
+  onValue: (value: unknown, exists: boolean, info: SingleDocSnapshotInfo) => void
 ): Unsubscribe | null {
   if (!isSyncGateOpen()) return null;
   const database = getIntranetDb();
@@ -527,7 +782,20 @@ export function subscribeToSingleDoc(
       (snap) => {
         if (!isSyncGateOpen()) return;
         reportReady();
-        onValue(snap.data(), snap.exists());
+        const exists = snap.exists();
+        const data = snap.data();
+        const info: SingleDocSnapshotInfo = {
+          fromCache: snap.metadata.fromCache,
+          knownFields: getSingleKnown(`${col}/${docId}`),
+          remoteHash: exists && data ? docHash(data) : null,
+        };
+        // Con una escritura local pendiente el snapshot trae NUESTRO cambio sin confirmar: no es estado sincronizado.
+        // Se registra ANTES de avisar, para que un reenvío por campo (ver pushSingleDoc) compare contra este
+        // estado y no vuelva a enviar lo que recién llegó del servidor.
+        if (!info.fromCache && !snap.metadata.hasPendingWrites && info.remoteHash !== null) {
+          setSingleKnown(`${col}/${docId}`, fieldHashes(data ?? {}));
+        }
+        onValue(data, exists, info);
       },
       (err) => {
         if (!isSyncGateOpen()) return;

@@ -66,6 +66,8 @@ la app sigue funcionando y reintenta con cada cambio.
   en `authorized_users` (o administradores maestros).
 - **Escribir contenido**: solo administradores (maestros definidos dentro de `firestore.rules`,
   o usuarios promovidos y aprobados en `authorized_users`).
+- **Lista de usuarios (`authorized_users`)**: la lee solo Administración (lleva correos y nombres). Cada persona
+  lee únicamente su propia ficha.
 - **Visitas pendientes**: pueden crear su propia ficha como `pendiente`; un visitante no puede
   auto-aprobarse, salvo que el modo compartido `auto_visitor` esté activado por un admin.
 - **Auditorías de cursada**: el visitante solo puede escribir sus propios checks (la lista de

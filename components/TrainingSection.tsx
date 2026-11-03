@@ -24,7 +24,8 @@ import {
   Edit2,
 } from 'lucide-react';
 import { TrainingCourse, CourseModuleCheck, AgentCourseAudit } from '@/lib/mock-data';
-import { getCourseAudits, toggleCourseModuleCheck, submitAuditCsat, getCourseCsatStats } from '@/lib/storage';
+import { getCourseAudits, toggleCourseModuleCheck, submitAuditCsat, getTrainingResults } from '@/lib/storage';
+import { computeCsatIndex } from '@/lib/metrics';
 import type { UserProfile } from '@/lib/auth';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
@@ -65,12 +66,13 @@ export function TrainingSection({
     const { updatedAudit, allAudits } = toggleCourseModuleCheck(course, unitIndex, {
       displayName: currentUserName,
       email: currentUserEmail,
+      uid: user?.provider === 'google' ? user.uid : undefined,
     });
     setAudits(allAudits);
   };
 
   const handleRateCsat = (auditId: string, rating: 'Muy Satisfecho' | 'Satisfecho' | 'Neutral' | 'Insatisfecho') => {
-    const updated = submitAuditCsat(auditId, rating);
+    const updated = submitAuditCsat(auditId, rating, undefined, user?.provider === 'google' ? user.uid : undefined);
     setAudits(updated);
   };
 
@@ -237,7 +239,7 @@ export function TrainingSection({
 
       {/* Indicador Oficial de Calidad Académica e Índice CSAT */}
       {(() => {
-        const csatStats = getCourseCsatStats();
+        const csatStats = computeCsatIndex(getTrainingResults());
         return (
           <div className="bg-white rounded-xl border border-slate-200 p-3.5 sm:p-5 shadow-2xs">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4">

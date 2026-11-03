@@ -190,7 +190,7 @@ export function LinksSection({
     if (!newTitle.trim() || !newUrl.trim()) return;
 
     let formattedUrl = newUrl.trim();
-    if (!formattedUrl.startsWith('http://') && !formattedUrl.startsWith('https://')) {
+    if (!/^https?:\/\//i.test(formattedUrl)) {
       formattedUrl = 'https://' + formattedUrl;
     }
 

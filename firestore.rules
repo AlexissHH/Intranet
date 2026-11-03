@@ -3,10 +3,14 @@ rules_version = '2';
 // Reglas de la base Firestore de la Intranet (Instituto de Capacitación Legislativa).
 //
 // Modelo:
-//  - authorized_users/{identificador}: roles y estados de acceso. Doc ID = EMAIL.
+//  - authorized_users/{identificador}: roles y estados de acceso. Doc ID = EMAIL. La lista la lee Administración;
+//    cada persona, solo su propia ficha.
 //  - Colecciones de contenido: solo administradores escriben; aprobados leen.
 //  - course_audits: el visitante puede escribir SOLO sus propios checks de cursada;
 //    jamás puede homologar (aprobado_admin) ni tocar certifiedAt/adminNotes de otro.
+//    Lectura: Administración todas; cada agente solo las propias.
+//  - training_results: resultado anónimo de cada cursada terminada (sin datos personales),
+//    legible por todos los aprobados para las cifras de Inicio.
 //
 // Desplegar con: firebase deploy --only firestore:rules
 // o pegar el contenido en Firebase Console → Firestore Database → Rules.
@@ -66,8 +70,14 @@ service cloud.firestore {
     /* ── Usuarios autorizados ─────────────────────────────────────────────── */
 
     match /authorized_users/{userEmail} {
-      // Lectura: la UI lista aprobados/pendientes; solo con sesión iniciada.
-      allow read: if request.auth != null;
+      // Lectura: la lista completa (correos y nombres de todas las personas) es solo de Administración.
+      // Cada persona puede leer ÚNICAMENTE su propia ficha (así el login sabe si está pendiente, aprobada o
+      // rechazada). El cliente escucha la colección solo si es administrador (ensureUsersSync en lib/auth.ts).
+      // ORDEN DE PUBLICACIÓN: esta línea va en el PASO 3, DESPUÉS de desplegar el código nuevo: el código viejo
+      // hace que todo usuario aprobado escuche la colección completa y esa consulta quedaría rechazada.
+      // En los pasos 1 y 2 la línea vigente es:  allow read: if request.auth != null;
+      allow read: if isAdmin()
+        || (emailVerified() && userEmail == currentEmail());
 
       // Auto-registro: cada usuario crea SOLO su propia ficha.
       //  - pendiente: comportamiento por defecto (espera aprobación del admin).
@@ -163,7 +173,18 @@ service cloud.firestore {
       return request.resource.data.agentEmail == currentEmail();
     }
 
+    // `agentUid` (opcional) solo puede ser el uid de quien escribe: lo usa training_results para acreditar
+    // que un resultado anónimo pertenece a su dueño.
+    function agentUidIsOwn() {
+      return !('agentUid' in request.resource.data)
+        || request.resource.data.agentUid == request.auth.uid;
+    }
+
     // Campos que un visitante puede alterar de su propia cursada.
+    //  - 'aprobado_admin' y 'observado' son decisiones de Administración: el agente no las asigna ni las revierte,
+    //    y una cursada en ese estado solo admite la reseña (una vez) y completar su uid.
+    //  - La reseña (csatRating/csatComment/csatSubmittedAt) se deja una sola vez: no se puede cambiar después.
+    // LÍMITE: estas reglas no pueden comprobar el ritmo de lectura; 'consistente' lo calcula el navegador.
     function visitorAuditChangeIsLegit() {
       return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
         'checks',
@@ -177,17 +198,72 @@ service cloud.firestore {
         'timeDeltaMinutes',
         'csatRating',
         'csatComment',
-      ]);
+        'csatSubmittedAt',
+        'agentUid',
+      ])
+      && (resource.data.auditStatus in ['aprobado_admin', 'observado']
+          ? request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['csatRating', 'csatComment', 'csatSubmittedAt', 'agentUid'])
+          : request.resource.data.auditStatus in ['en_progreso', 'consistente', 'alerta_simultanea'])
+      && (!('csatRating' in resource.data)
+          || !request.resource.data.diff(resource.data).affectedKeys()
+              .hasAny(['csatRating', 'csatComment', 'csatSubmittedAt']));
     }
 
     match /course_audits/{docId} {
-      allow read: if approvedOrAdminRead();
+      // PRIVACIDAD: las cursadas llevan nombre, email y comentarios. Las lee Administración completas y cada
+      // agente solo las propias (el cliente consulta con where agentEmail == su email). Las cifras que ven los
+      // demás salen de training_results, que no tiene datos personales.
+      // ORDEN DE PUBLICACIÓN: esta línea se publica en el PASO 3, DESPUÉS de desplegar el código nuevo (el código
+      // viejo escucha toda la colección y esa consulta quedaría rechazada). En los pasos 1 y 2 la línea vigente es:
+      //   allow read: if approvedOrAdminRead();
+      allow read: if isAdmin()
+        || (isApprovedUser() && resource.data.agentEmail == currentEmail());
       allow create: if isAdmin()
-        || (isApprovedUser() && ownAudit()
+        || (isApprovedUser() && ownAudit() && agentUidIsOwn()
             && request.resource.data.auditStatus in ['en_progreso', 'consistente', 'alerta_simultanea']);
       allow update: if isAdmin()
-        || (isApprovedUser() && ownAudit() && visitorAuditChangeIsLegit());
+        || (isApprovedUser() && ownAudit() && agentUidIsOwn() && visitorAuditChangeIsLegit());
       allow delete: if isAdmin();
+    }
+
+    /* ── Resultados anónimos de cursada (lo único que ven los demás) ──────── */
+
+    // Un documento por cursada terminada (id = id de la cursada): sin nombre, email, área ni comentario.
+    // Lo escribe el dueño de la cursada (personKey = su uid) o Administración; lo leen todos los aprobados.
+    function resultShapeOk(auditId) {
+      return request.resource.data.keys().hasOnly(['id', 'courseId', 'personKey', 'closedAt', 'csatRating', 'formado'])
+        && request.resource.data.keys().hasAll(['id', 'courseId', 'personKey', 'closedAt', 'csatRating', 'formado'])
+        && request.resource.data.id == auditId
+        && request.resource.data.courseId is string
+        && request.resource.data.courseId.size() <= 120
+        && request.resource.data.personKey is string
+        && request.resource.data.personKey.size() >= 1
+        && request.resource.data.personKey.size() <= 128
+        && request.resource.data.closedAt is number
+        && request.resource.data.csatRating in ['Muy Satisfecho', 'Satisfecho', 'Neutral', 'Insatisfecho']
+        && request.resource.data.formado is bool;
+    }
+
+    function ownResult(auditId) {
+      return isApprovedUser()
+        && request.resource.data.personKey == request.auth.uid
+        && exists(/databases/$(database)/documents/course_audits/$(auditId))
+        && get(/databases/$(database)/documents/course_audits/$(auditId)).data.agentEmail == currentEmail()
+        // El resultado debe coincidir con la cursada real: mismo curso, misma reseña y cursada completa.
+        && request.resource.data.courseId == get(/databases/$(database)/documents/course_audits/$(auditId)).data.courseId
+        && request.resource.data.csatRating == get(/databases/$(database)/documents/course_audits/$(auditId)).data.csatRating
+        && get(/databases/$(database)/documents/course_audits/$(auditId)).data.isFullyCompleted == true
+        && (request.resource.data.formado == false
+            || get(/databases/$(database)/documents/course_audits/$(auditId)).data.auditStatus
+                 in ['consistente', 'aprobado_admin']);
+    }
+
+    match /training_results/{auditId} {
+      allow read: if approvedOrAdminRead();
+      allow create, update: if resultShapeOk(auditId) && (isAdmin() || ownResult(auditId));
+      allow delete: if isAdmin()
+        || (isApprovedUser() && resource.data.personKey == request.auth.uid);
     }
 
     /* ── Encuestas CSAT de visitas (creación anónima, una vez) ────────────── */
