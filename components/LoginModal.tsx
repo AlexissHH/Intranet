@@ -32,6 +32,7 @@ import {
   saveRememberedDeviceUser,
   type RememberedDeviceUser,
 } from '@/lib/auth';
+import { getErrorCode, getErrorMessage } from '@/lib/utils';
 import { getInstitutionalSettings } from '@/lib/storage';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
@@ -125,16 +126,18 @@ export function LoginModal({
       });
   };
 
-  const handleAuthError = (err: any) => {
-    const code = err?.code || null;
+  const handleAuthError = (err: unknown) => {
+    const code = getErrorCode(err);
     setErrorCode(code);
     if (code === 'auth/pending-approval') {
       setPendingNotice(
-        err.message ||
+        getErrorMessage(
+          err,
           'Tu registro ha sido enviado al Administrador del Sistema. Podrás ingresar una vez que se apruebe tu acceso.'
+        )
       );
     } else {
-      setErrorMsg(err?.message || 'Error al conectar con los servicios de autenticación.');
+      setErrorMsg(getErrorMessage(err, 'Error al conectar con los servicios de autenticación.'));
     }
   };
 
@@ -157,7 +160,7 @@ export function LoginModal({
         onLoginSuccess(result.profile, result.accessToken);
         onClose();
       }
-    } catch (err: any) {
+    } catch (err) {
       handleAuthError(err);
     } finally {
       setIsGoogleLoading(false);
@@ -181,7 +184,7 @@ export function LoginModal({
         onLoginSuccess(result.profile, result.accessToken);
         onClose();
       }
-    } catch (err: any) {
+    } catch (err) {
       handleAuthError(err);
     } finally {
       setIsGisLoading(false);
@@ -195,7 +198,7 @@ export function LoginModal({
     setPendingNotice(null);
     try {
       await googleSignInWithRedirect(includeWorkspaceScopes);
-    } catch (err: any) {
+    } catch (err) {
       handleAuthError(err);
       setIsRedirectLoading(false);
     }
@@ -228,7 +231,7 @@ export function LoginModal({
       });
       onLoginSuccess(profile, null);
       onClose();
-    } catch (err: any) {
+    } catch (err) {
       handleAuthError(err);
     }
   };
@@ -258,7 +261,7 @@ export function LoginModal({
       });
       onLoginSuccess(profile, null);
       onClose();
-    } catch (err: any) {
+    } catch (err) {
       handleAuthError(err);
     }
   };

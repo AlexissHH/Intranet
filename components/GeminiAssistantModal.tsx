@@ -16,6 +16,7 @@ import {
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
 import { getFirebaseIdToken } from '@/lib/auth';
+import { getErrorMessage } from '@/lib/utils';
 
 interface GeminiAssistantModalProps {
   isOpen: boolean;
@@ -82,8 +83,8 @@ export function GeminiAssistantModal({
       }
       setResponse(data.text);
       setModelUsed(data.modelUsed);
-    } catch (err: any) {
-      setError(err.message || 'Ocurrió un error inesperado');
+    } catch (err) {
+      setError(getErrorMessage(err, 'Ocurrió un error inesperado'));
     } finally {
       setLoading(false);
     }

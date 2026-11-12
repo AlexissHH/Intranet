@@ -96,10 +96,10 @@ export async function POST(req: NextRequest) {
       user = await verifyFirebaseIdToken(match[1].trim(), { projectId: projectId() });
     } catch (e) {
       if (e instanceof TokenVerificationError) {
-        return json({ error: 'Tu sesión no es válida o expiró. Volvé a iniciar sesión.' }, 401);
+        return json({ error: 'Tu sesión no es válida o expiró. Vuelve a iniciar sesión.' }, 401);
       }
       console.error('Gemini API: no se pudo verificar el token:', e);
-      return json({ error: 'No se pudo verificar tu sesión en este momento. Intentá de nuevo.' }, 503);
+      return json({ error: 'No se pudo verificar tu sesión en este momento. Intenta de nuevo.' }, 503);
     }
 
     // 2) Autorización.
@@ -113,7 +113,7 @@ export async function POST(req: NextRequest) {
     const rate = checkRateLimit(`gemini:${user.uid}`, limit, windowMin * 60_000);
     if (!rate.allowed) {
       return json(
-        { error: `Alcanzaste el límite de ${limit} consultas cada ${windowMin} minutos. Probá de nuevo en unos instantes.` },
+        { error: `Alcanzaste el límite de ${limit} consultas cada ${windowMin} minutos. Prueba de nuevo en unos instantes.` },
         429,
         { 'Retry-After': String(rate.retryAfterSeconds) }
       );
@@ -187,7 +187,7 @@ export async function POST(req: NextRequest) {
     console.error('Error en API Gemini:', error);
     const status = errorStatus(error);
     if (status === 429) {
-      return json({ error: 'El servicio de IA está saturado. Probá de nuevo en unos minutos.' }, 429);
+      return json({ error: 'El servicio de IA está saturado. Prueba de nuevo en unos minutos.' }, 429);
     }
     return json({ error: 'Error procesando la solicitud con inteligencia artificial.' }, 502);
   }

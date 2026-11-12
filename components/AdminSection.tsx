@@ -55,6 +55,7 @@ import {
   Phone,
   ChevronUp,
   ChevronDown,
+  Eye,
 } from 'lucide-react';
 import { ConfirmationModal } from '@/components/ConfirmationModal';
 import {
@@ -84,15 +85,18 @@ import { Reorder, useDragControls } from 'motion/react';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
 import { VISIT_LEVEL_OPTIONS } from './QuickActionsModal';
-import { computeTrainingMetrics, computeVisitMetrics, getActualAttendees, getMetricPeriodRef } from '@/lib/metrics';
-import { getLocalDateString } from '@/lib/utils';
+import { computeTrainingMetrics, computeVisitMetrics, getMetricPeriodRef, summarizeVisitRequests } from '@/lib/metrics';
+import { getInstitutionalTodayParts, getLocalDateString } from '@/lib/utils';
 import {
   getAuthorizedUsers,
   getApprovalMode,
   setApprovalMode,
   getEffectiveFirebaseConfig,
+  setUserAllowedSections,
+  type AuthorizedUser,
   type UserProfile,
 } from '@/lib/auth';
+import { INTRANET_SECTIONS, parseAllowedSections, type IntranetSectionId } from '@/lib/access-config';
 import type {
   ActivityItem,
   NewsItem,
@@ -125,6 +129,214 @@ interface AdminSectionProps {
   onSettingsUpdated?: (settings: InstitutionalSettings) => void;
   onSetAnnouncementNewsId?: (id: string | null) => void;
   initialTab?: 'visitas' | 'objetivos' | 'auditoria_cursos' | 'cards_instituto' | 'institucional' | 'usuarios' | 'contenidos' | 'mantenimiento';
+}
+
+/** Mensaje en español para un error al guardar las secciones visibles de un usuario. */
+function describeSectionsSaveError(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === 'permission-denied') {
+    return 'La base compartida rechazó el cambio: tu cuenta no tiene permiso para editar esta ficha.';
+  }
+  if (code === 'not-found') {
+    return 'Este usuario no tiene ficha en la base compartida, por eso no se puede guardar. Se crea cuando ingresa por primera vez con su cuenta de Google.';
+  }
+  if (typeof code === 'string') return 'No se pudo guardar en la base compartida. Intenta de nuevo.';
+  // Errores propios de setUserAllowedSections (ya están en español).
+  return err instanceof Error && err.message ? err.message : 'No se pudo guardar. Intenta de nuevo.';
+}
+
+/**
+ * Acreditaciones: Administración elige qué secciones ve cada visitante. Lo no elegido desaparece de toda la
+ * intranet para esa persona (pestaña, tarjetas y accesos en otras páginas), sin avisos de bloqueo.
+ */
+function UserSectionsEditor({ users }: { users: AuthorizedUser[] }) {
+  const [query, setQuery] = useState('');
+  const [editingEmail, setEditingEmail] = useState<string | null>(null);
+  const [draft, setDraft] = useState<IntranetSectionId[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
+
+  const visitors = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return users
+      .filter((u) => u.role === 'visitante' && u.status !== 'rechazado')
+      .filter((u) => !q || u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName, 'es'));
+  }, [users, query]);
+
+  const startEdit = (u: AuthorizedUser) => {
+    setEditingEmail(u.email);
+    setDraft(parseAllowedSections(u.allowedSections) ?? INTRANET_SECTIONS.map((s) => s.id));
+    setFeedback(null);
+  };
+
+  const toggleSection = (id: IntranetSectionId) => {
+    setDraft((prev) => (prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]));
+  };
+
+  const handleSave = async (u: AuthorizedUser) => {
+    if (draft.length === 0 || saving) return;
+    setSaving(true);
+    setFeedback(null);
+    try {
+      await setUserAllowedSections(u.email, draft);
+      setEditingEmail(null);
+      setFeedback({
+        type: 'ok',
+        text: `Se guardaron las secciones de ${u.displayName}. Si tiene la intranet abierta, lo verá al instante.`,
+      });
+    } catch (err) {
+      setFeedback({ type: 'error', text: describeSectionsSaveError(err) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="p-4 rounded-xl border border-slate-200 bg-white space-y-3">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+        <div className="space-y-1 min-w-0">
+          <div className="text-xs font-bold text-[#001428] flex items-center gap-2">
+            <Eye className="w-4 h-4 text-[#0284c7] shrink-0" />
+            <span>Secciones visibles por usuario</span>
+          </div>
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            Elige qué secciones ve cada usuario. Lo que no elijas no le aparece en ningún lugar: ni la pestaña ni las
+            tarjetas o accesos de esa sección dentro de otras páginas. Los administradores ven todo.
+          </p>
+          <p className="text-[11px] text-amber-800 leading-relaxed">
+            Esto ordena lo que se muestra, pero no protege los datos: un usuario aprobado puede seguir leyéndolos desde
+            la base. No lo uses para resguardar información sensible.
+          </p>
+        </div>
+        <div className="relative sm:w-56 shrink-0">
+          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Buscar usuario"
+            aria-label="Buscar usuario"
+            className="w-full text-xs pl-8 pr-2.5 py-1.5 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none"
+          />
+        </div>
+      </div>
+
+      {feedback && (
+        <div
+          role="status"
+          className={`text-[11px] px-3 py-2 rounded-lg border ${
+            feedback.type === 'ok'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-rose-50 border-rose-200 text-rose-800'
+          }`}
+        >
+          {feedback.text}
+        </div>
+      )}
+
+      {visitors.length === 0 ? (
+        <div className="p-4 text-center text-xs text-slate-500 bg-slate-50 rounded-lg border border-slate-100">
+          {query.trim() ? 'Ningún usuario coincide con la búsqueda.' : 'Todavía no hay usuarios visitantes registrados.'}
+        </div>
+      ) : (
+        <div className="divide-y divide-slate-200 border border-slate-200 rounded-xl overflow-hidden">
+          {visitors.map((u) => {
+            const sections = parseAllowedSections(u.allowedSections);
+            const isEditing = editingEmail === u.email;
+            const summary = sections
+              ? `${sections.length} de ${INTRANET_SECTIONS.length}: ${INTRANET_SECTIONS.filter((s) => sections.includes(s.id))
+                  .map((s) => s.label)
+                  .join(', ')}`
+              : 'Todas las secciones';
+            return (
+              <div key={u.id} className="p-3 space-y-2.5 text-xs">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-bold text-[#001428] truncate flex items-center gap-2">
+                      <span className="truncate">{u.displayName}</span>
+                      {u.status === 'pendiente' && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-800 shrink-0">
+                          pendiente
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-slate-500 text-[11px] truncate">{u.email}</div>
+                    {!isEditing && <div className="text-[11px] text-slate-600 mt-0.5">{summary}</div>}
+                  </div>
+                  {!isEditing && (
+                    <button
+                      type="button"
+                      onClick={() => startEdit(u)}
+                      disabled={saving}
+                      className="self-start sm:self-center inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-bold text-[#001428] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                      <span>Elegir secciones</span>
+                    </button>
+                  )}
+                </div>
+
+                {isEditing && (
+                  <div className="space-y-2.5">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {INTRANET_SECTIONS.map((s) => (
+                        <label
+                          key={s.id}
+                          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg border cursor-pointer select-none ${
+                            draft.includes(s.id) ? 'border-[#0284c7] bg-sky-50 text-[#001428]' : 'border-slate-200 text-slate-600'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={draft.includes(s.id)}
+                            onChange={() => toggleSection(s.id)}
+                            disabled={saving}
+                            className="accent-[#0284c7]"
+                          />
+                          <span className="font-semibold text-[11px]">{s.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                    {draft.length === 0 && (
+                      <p className="text-[11px] text-rose-700">Elige al menos una sección.</p>
+                    )}
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDraft(INTRANET_SECTIONS.map((s) => s.id))}
+                        disabled={saving}
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold text-[#0284c7] hover:bg-sky-50 cursor-pointer disabled:opacity-50"
+                      >
+                        Marcar todas
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditingEmail(null)}
+                        disabled={saving}
+                        className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-700 cursor-pointer disabled:opacity-50"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleSave(u)}
+                        disabled={saving || draft.length === 0}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#001428] hover:bg-[#122a45] text-white text-xs font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Save className="w-3.5 h-3.5" />
+                        <span>{saving ? 'Guardando…' : 'Guardar'}</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -578,15 +790,14 @@ export function AdminSection({
     return activities.filter((a) => a.type === 'visita');
   }, [activities]);
 
-  const pendingVisitsCount = schoolVisits.filter((v) => v.status === 'pendiente').length;
-  const confirmedVisitsCount = schoolVisits.filter((v) => v.status === 'confirmada' || v.status === 'en_curso' || v.status === 'finalizada').length;
-  const cancelledVisitsCount = schoolVisits.filter((v) => v.status === 'cancelada').length;
-  const totalAlumnosVisitas = schoolVisits
-    .filter((v) => v.status !== 'cancelada')
-    .reduce((sum, v) => sum + (v.attendeesCount || 0), 0);
-
-  // Asistencia REAL cargada al finalizar (las cifras de arriba son estimaciones del agendado).
-  const totalAlumnosAsistieron = schoolVisits.reduce((sum, v) => sum + (getActualAttendees(v) ?? 0), 0);
+  // Contadores del listado: salen de lib/metrics.ts (las cifras no se calculan en el componente).
+  const visitRequestSummary = useMemo(() => summarizeVisitRequests(schoolVisits), [schoolVisits]);
+  const pendingVisitsCount = visitRequestSummary.pendientes;
+  const confirmedVisitsCount = visitRequestSummary.confirmadas;
+  const cancelledVisitsCount = visitRequestSummary.canceladas;
+  const totalAlumnosVisitas = visitRequestSummary.alumnosEstimados;
+  // Asistencia REAL cargada al finalizar (la cifra de arriba es la estimación del agendado).
+  const totalAlumnosAsistieron = visitRequestSummary.alumnosAsistieron;
 
   const filteredVisits = useMemo(() => {
     return schoolVisits.filter((v) => {
@@ -1410,7 +1621,7 @@ export function AdminSection({
                     <div className="flex items-center justify-between text-xs text-slate-300">
                       <span className="uppercase tracking-wider font-extrabold text-[10px] text-sky-400 flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                        GESTIÓN {new Date().getFullYear()} • EN VIVO
+                        GESTIÓN {getInstitutionalTodayParts().year} • EN VIVO
                       </span>
                       <BarChart3 className="w-4 h-4 text-sky-400" />
                     </div>
@@ -2732,6 +2943,8 @@ export function AdminSection({
                   ))}
                 </div>
               </div>
+
+              <UserSectionsEditor users={authorizedUsers} />
             </div>
           )}
 

@@ -393,8 +393,8 @@ export function downloadActivitySheetPdf(activity: ActivityItem) {
     { label: 'Institución / Sector', val: activity.institution || LEGISLATURE_NAME },
     { label: 'Nivel / Modalidad', val: activity.level || 'Personal Legislativo / Institucional' },
     { label: 'Estado de la Reserva', val: statusLabel(activity.status) },
-    ...(activity.contactEmail ? [{ label: 'Email de Contacto', val: activity.contactEmail }] : []),
-    ...(activity.contactPhone ? [{ label: 'Teléfono de Contacto', val: activity.contactPhone }] : []),
+    // Sin email ni teléfono de contacto: son datos personales del docente o referente de la escuela y una
+    // ficha en PDF circula fuera de la intranet. Se consultan en la ficha de la actividad.
   ];
 
   doc.setFont('helvetica', 'bold');

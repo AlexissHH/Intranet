@@ -24,6 +24,24 @@ export interface CalendarEventPayload {
   startDate?: string;     // YYYY-MM-DD for all-day event
   endDate?: string;       // YYYY-MM-DD for all-day event
   recurrence?: string[];  // e.g. ['RRULE:FREQ=YEARLY']
+  /** Id de la actividad de la intranet: queda en el evento para no volver a importarlo desde Calendar. */
+  activityId?: string;
+  /**
+   * Correos de las cuentas que reciben el evento en su propio calendario. Se validan y se deduplican acá;
+   * Google NO les envía email (`sendUpdates=none`) y entre invitados no se ven los correos.
+   */
+  attendees?: string[];
+}
+
+/** Tope de invitados por evento que se envía a Google (el límite de Calendar es mayor). */
+export const MAX_CALENDAR_ATTENDEES = 200;
+
+/** El evento ya no existe en el calendario consultado (404/410): se borró o está en el calendario de otra cuenta. */
+export class WorkspaceNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkspaceNotFoundError';
+  }
 }
 
 export interface SendEmailPayload {
@@ -86,7 +104,9 @@ async function googleApiFetch(
     if (res.status === 401) throw new WorkspaceAuthError(messages.auth, 401);
     if (res.status === 403) throw new WorkspaceAuthError(messages.forbidden, 403);
     const errorData = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
-    throw new Error(errorData.error?.message || messages.generic);
+    const message = errorData.error?.message || messages.generic;
+    if (res.status === 404 || res.status === 410) throw new WorkspaceNotFoundError(message);
+    throw new Error(message);
   }
 
   return res.json();
@@ -110,24 +130,90 @@ export async function getCalendarEvents(accessToken: string, maxResults = 10) {
   return data.items || [];
 }
 
+/** Evento de Google Calendar con los campos que usa la importación a la agenda. */
+export interface GoogleCalendarEvent {
+  id: string;
+  status?: string;
+  eventType?: string;
+  summary?: string;
+  description?: string;
+  location?: string;
+  recurringEventId?: string;
+  start?: { date?: string; dateTime?: string };
+  end?: { date?: string; dateTime?: string };
+  extendedProperties?: { private?: Record<string, string> };
+}
+
 /**
- * Create a new event on user's Google Calendar
+ * Próximos eventos del calendario PRINCIPAL de la cuenta conectada, desde `timeMin`, en orden cronológico
+ * y con los eventos repetidos ya expandidos. Solo lee: no modifica nada en Calendar.
  */
-export async function createCalendarEvent(
+export async function listUpcomingCalendarEvents(
   accessToken: string,
-  event: CalendarEventPayload
-) {
-  const url = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+  options: { timeMin: string; maxResults: number }
+): Promise<GoogleCalendarEvent[]> {
+  const params = new URLSearchParams({
+    timeMin: options.timeMin,
+    maxResults: String(Math.min(Math.max(options.maxResults, 1), 250)),
+    singleEvents: 'true',
+    orderBy: 'startTime',
+    fields: 'items(id,status,eventType,summary,description,location,recurringEventId,start,end,extendedProperties/private)',
+  });
+  const data = (await googleApiFetch(
+    accessToken,
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params.toString()}`,
+    undefined,
+    {
+      auth: 'La sesión de Google Calendar ha expirado. Por favor vuelve a conectar tu cuenta de Google.',
+      forbidden:
+        'Google Calendar rechazó el acceso. Vuelve a conectar tu cuenta de Google y acepta los permisos de Calendario.',
+      generic: 'Error al leer los eventos del Calendario de Google',
+    }
+  )) as { items?: GoogleCalendarEvent[] };
+  return Array.isArray(data.items) ? data.items : [];
+}
 
-  interface GoogleCalendarEventBody {
-    summary: string;
-    description: string;
-    location: string;
-    start: { date?: string; dateTime?: string; timeZone?: string };
-    end: { date?: string; dateTime?: string; timeZone?: string };
-    recurrence?: string[];
+interface GoogleCalendarEventBody {
+  summary: string;
+  description: string;
+  location: string;
+  start: { date?: string; dateTime?: string; timeZone?: string };
+  end: { date?: string; dateTime?: string; timeZone?: string };
+  recurrence?: string[];
+  extendedProperties?: { private: Record<string, string> };
+  status?: 'confirmed' | 'cancelled';
+  attendees?: { email: string; displayName?: string; responseStatus?: string; optional?: boolean }[];
+  guestsCanSeeOtherGuests?: boolean;
+  guestsCanInviteOthers?: boolean;
+  guestsCanModify?: boolean;
+}
+
+const CALENDAR_EVENTS_URL = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+
+/** Correos válidos, en minúscula y sin repetir, hasta el tope por evento. */
+function sanitizeAttendeeEmails(emails: string[] | undefined): string[] {
+  const unique = new Set<string>();
+  for (const raw of emails ?? []) {
+    const clean = (raw ?? '').trim().toLowerCase();
+    if (!/[\r\n]/.test(clean) && SIMPLE_EMAIL_RE.test(clean)) unique.add(clean);
   }
+  return [...unique].slice(0, MAX_CALENDAR_ATTENDEES);
+}
 
+/** Los invitados solo reciben el evento: no ven a los demás, no pueden invitar ni modificarlo. */
+const GUEST_PERMISSIONS = {
+  guestsCanSeeOtherGuests: false,
+  guestsCanInviteOthers: false,
+  guestsCanModify: false,
+} as const;
+
+const CALENDAR_EVENT_MESSAGES = {
+  auth: 'La sesión de Google Calendar ha expirado. Por favor vuelve a conectar tu cuenta de Google.',
+  forbidden:
+    'Google Calendar rechazó la operación. Vuelve a conectar tu cuenta de Google y acepta los permisos de Calendario.',
+};
+
+function buildCalendarEventBody(event: CalendarEventPayload): GoogleCalendarEventBody {
   // Los horarios sin desfase explícito se interpretan en la zona horaria INSTITUCIONAL,
   // no en la del navegador de quien carga el evento (para que no cambie si alguien viaja).
   const tz = INSTITUTIONAL_TIMEZONE;
@@ -161,13 +247,82 @@ export async function createCalendarEvent(
   if (event.recurrence && event.recurrence.length > 0) {
     body.recurrence = event.recurrence;
   }
+  return body;
+}
 
-  return googleApiFetch(accessToken, url, { method: 'POST', body }, {
-    auth: 'La sesión de Google Calendar ha expirado. Por favor vuelve a conectar tu cuenta de Google.',
-    forbidden:
-      'Google Calendar rechazó la operación. Vuelve a conectar tu cuenta de Google y acepta los permisos de Calendario.',
-    generic: 'Error al agendar evento en Google Calendar',
-  });
+/**
+ * Create a new event on user's Google Calendar.
+ * Devuelve el id del evento creado (para poder actualizarlo o cancelarlo después). Si se pasan `attendees`,
+ * el evento aparece en el calendario de cada uno SIN enviarles email (`sendUpdates=none`).
+ */
+export async function createCalendarEvent(
+  accessToken: string,
+  event: CalendarEventPayload
+): Promise<{ id?: string }> {
+  const body = buildCalendarEventBody(event);
+
+  // Marca de origen (propiedad privada del evento, no visible en Calendar): la importación desde Calendar
+  // la usa para no traer de vuelta lo que ya salió de la intranet.
+  body.extendedProperties = {
+    private: { iclSource: 'intranet', ...(event.activityId ? { iclActivityId: event.activityId } : {}) },
+  };
+
+  const attendees = sanitizeAttendeeEmails(event.attendees);
+  if (attendees.length > 0) {
+    body.attendees = attendees.map((email) => ({ email }));
+    Object.assign(body, GUEST_PERMISSIONS);
+  }
+
+  const created = (await googleApiFetch(
+    accessToken,
+    `${CALENDAR_EVENTS_URL}?sendUpdates=none`,
+    { method: 'POST', body },
+    { ...CALENDAR_EVENT_MESSAGES, generic: 'Error al agendar evento en Google Calendar' }
+  )) as { id?: string };
+  return { id: typeof created.id === 'string' ? created.id : undefined };
+}
+
+/**
+ * Actualiza (o cancela, con `cancelled`) un evento que ya existe en el calendario principal de la cuenta
+ * conectada. Nunca envía emails (`sendUpdates=none`). Si se pasan `attendees`, se SUMAN a los invitados que el
+ * evento ya tiene (por ejemplo, los de un evento importado): no se quita a nadie ni se pierde su respuesta.
+ * Lanza `WorkspaceNotFoundError` si el evento no existe en ese calendario.
+ */
+export async function updateCalendarEvent(
+  accessToken: string,
+  eventId: string,
+  event: CalendarEventPayload,
+  options: { cancelled?: boolean } = {}
+): Promise<void> {
+  const eventUrl = `${CALENDAR_EVENTS_URL}/${encodeURIComponent(eventId)}`;
+  const messages = { ...CALENDAR_EVENT_MESSAGES, generic: 'Error al actualizar el evento en Google Calendar' };
+
+  if (options.cancelled) {
+    await googleApiFetch(accessToken, `${eventUrl}?sendUpdates=none`, { method: 'PATCH', body: { status: 'cancelled' } }, messages);
+    return;
+  }
+
+  const body = buildCalendarEventBody(event);
+  body.status = 'confirmed';
+
+  const wanted = sanitizeAttendeeEmails(event.attendees);
+  if (wanted.length > 0) {
+    const current = (await googleApiFetch(
+      accessToken,
+      `${eventUrl}?fields=attendees(email,displayName,responseStatus,optional)`,
+      undefined,
+      messages
+    )) as { attendees?: NonNullable<GoogleCalendarEventBody['attendees']> };
+    const existing = current.attendees ?? [];
+    const known = new Set(existing.map((a) => a.email.toLowerCase()));
+    body.attendees = [...existing, ...wanted.filter((email) => !known.has(email)).map((email) => ({ email }))].slice(
+      0,
+      MAX_CALENDAR_ATTENDEES
+    );
+    Object.assign(body, GUEST_PERMISSIONS);
+  }
+
+  await googleApiFetch(accessToken, `${eventUrl}?sendUpdates=none`, { method: 'PATCH', body }, messages);
 }
 
 /**

@@ -843,8 +843,8 @@ function reportSyncError(e: unknown, context: string, operation: 'lectura' | 'es
 /**
  * Comprueba TODA la cadena de una vez y entrega UNA conclusión puntual:
  *   app → proyecto correcto → reglas publicadas → identidad admin reconocida.
- * Distincción clave: si la lectura de authorized_users falla, el problema NO es la
- * cuenta (cualquier sesión puede leer esa colección): es reglas/otra base/otro proyecto.
+ * Distinción clave: lee la PROPIA ficha de authorized_users (toda sesión puede leer la suya); si esa
+ * lectura falla, el problema NO es la cuenta: es reglas/otra base/otro proyecto.
  */
 export async function runAccessDiagnostics(email: string): Promise<void> {
   const database = await ensureFirestoreReady();
@@ -865,7 +865,7 @@ export async function runAccessDiagnostics(email: string): Promise<void> {
   const idToken = await getFirebaseIdToken();
   if (!idToken) {
     lines.push(
-      '→ La sesión de Google real está VACÍA: ingresaste escribiendo el email (institucional) y Firestore bloquea SIEMPRE esas sesiones. Usá "Continuar con Google".'
+      '→ La sesión de Google real está VACÍA: ingresaste escribiendo el email (institucional) y Firestore bloquea SIEMPRE esas sesiones. Usa "Continuar con Google".'
     );
   } else if (googleEmail && cleanEmail && googleEmail !== cleanEmail) {
     lines.push(
@@ -876,16 +876,16 @@ export async function runAccessDiagnostics(email: string): Promise<void> {
     await getDoc(doc(database, 'authorized_users', cleanEmail || '__x__'));
     lines.push('→ Lectura de authorized_users OK: las reglas SI son visibles desde esta app/base.');
     try {
+      // Sin el email de quien prueba: meta/ lo leen todos los usuarios aprobados.
       await setDoc(doc(database, 'meta', 'health_check'), {
         at: new Date().toISOString(),
-        by: cleanEmail,
       });
       lines.push('→ Escritura OK: tu cuenta está reconocida como admin. Todo el sistema sincroniza bien.');
     } catch (writeErr) {
       const code = (writeErr as { code?: string })?.code ?? '';
       if (code === 'permission-denied') {
         lines.push('→ Escritura DENEGADA pero lectura OK: las reglas confirman que tu email NO es admin maestro.');
-        lines.push('   → Verificá con qué Gmail entraste (o pedí la aprobación/rol). Email del token: ' + cleanEmail);
+        lines.push('   → Verifica con qué cuenta de Google entraste (o pide la aprobación o el rol a un administrador).');
       } else {
         lines.push(`→ Escritura falló (${code}).`);
       }
@@ -894,7 +894,7 @@ export async function runAccessDiagnostics(email: string): Promise<void> {
     const code = (readErr as { code?: string })?.code ?? '';
     if (code === 'permission-denied') {
       lines.push(
-        '→ La app NO puede leer authorized_users: para ESTA app las reglas siguen en bloqueo total. Causas: (a) pegaste las reglas en otra BASE del selector (usá la "(predeterminada)"), (b) pegaste en otro PROYECTO (la app usa: ' +
+        '→ La app NO puede leer authorized_users: para ESTA app las reglas siguen en bloqueo total. Causas: (a) pegaste las reglas en otra BASE del selector (usa la "(predeterminada)"), (b) pegaste en otro PROYECTO (la app usa: ' +
           getEffectiveFirebaseConfig().config.projectId +
           '), o (c) el botón Publicar no se concretó.'
       );
@@ -908,5 +908,6 @@ export async function runAccessDiagnostics(email: string): Promise<void> {
   } catch {
     // Ignore
   }
-  console.info('[Firebase · diagnóstico]', lines.join(' | '));
+  // En la consola, sin correos: los logs no llevan datos personales.
+  console.info('[Firebase · diagnóstico]', lines.join(' | ').replace(/[^\s@()]+@[^\s@()]+/g, '[correo]'));
 }

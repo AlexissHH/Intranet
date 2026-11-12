@@ -31,7 +31,7 @@ import {
 } from 'lucide-react';
 import mammoth from 'mammoth';
 import { ResourceDocument } from '@/lib/mock-data';
-import { formatResourceUpdatedAt, getLocalDateString } from '@/lib/utils';
+import { formatResourceUpdatedAt, getLocalDateString, normalizeExternalUrl } from '@/lib/utils';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
 import { ConfirmationModal } from '@/components/ConfirmationModal';
@@ -216,7 +216,7 @@ export function ResourcesSection({
       setIsNewResourceModalOpen(false);
       setActiveResource(null);
       setIsDocxUploadModalOpen(true);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Error parsing DOCX with mammoth:', err);
       setDocxParseError('No se pudo procesar el archivo Word. Asegúrate de que sea un archivo .docx válido y sin contraseñas.');
       setIsNewResourceModalOpen(false);
@@ -267,7 +267,7 @@ export function ResourcesSection({
         fileName: file.name,
         words,
       });
-    } catch (err: any) {
+    } catch (err) {
       console.error('Error importing DOCX into form:', err);
       setFormDocxError('No se pudo leer el archivo .docx. Verifica que el archivo no esté dañado.');
     } finally {
@@ -308,12 +308,7 @@ export function ResourcesSection({
 
     // Esquema forzado: lo que no venga con http(s) recibe https:// (un `javascript:` o
     // cualquier esquema raro nunca llega a un href de navegador).
-    const driveRaw = newDriveUrl.trim();
-    const driveUrl = driveRaw
-      ? /^https?:\/\//i.test(driveRaw)
-        ? driveRaw
-        : `https://${driveRaw}`
-      : undefined;
+    const driveUrl = normalizeExternalUrl(newDriveUrl);
 
     const newDoc: ResourceDocument = {
       id: 'res-' + Date.now(),
@@ -1124,7 +1119,7 @@ export function ResourcesSection({
                   <label className="block text-xs font-bold text-[#001428] mb-1">Categoría</label>
                   <select
                     value={newCategory}
-                    onChange={(e: any) => setNewCategory(e.target.value)}
+                    onChange={(e) => setNewCategory(e.target.value as typeof newCategory)}
                     className="w-full text-xs p-2 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none bg-white font-medium cursor-pointer"
                   >
                     <option value="visita_escolar">Visitas Escolares</option>
@@ -1139,7 +1134,7 @@ export function ResourcesSection({
                   <label className="block text-xs font-bold text-[#001428] mb-1">Formato</label>
                   <select
                     value={newFormat}
-                    onChange={(e: any) => setNewFormat(e.target.value)}
+                    onChange={(e) => setNewFormat(e.target.value as typeof newFormat)}
                     className="w-full text-xs p-2 rounded-lg border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none bg-white font-medium cursor-pointer"
                   >
                     <option value="DOCX">DOCX (Word)</option>

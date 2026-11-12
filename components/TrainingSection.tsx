@@ -26,6 +26,7 @@ import {
 import { TrainingCourse, CourseModuleCheck, AgentCourseAudit } from '@/lib/mock-data';
 import { getCourseAudits, toggleCourseModuleCheck, submitAuditCsat, getTrainingResults } from '@/lib/storage';
 import { computeCsatIndex } from '@/lib/metrics';
+import { normalizeExternalUrl } from '@/lib/utils';
 import type { UserProfile } from '@/lib/auth';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
@@ -172,8 +173,9 @@ export function TrainingSection({
         .split('\n')
         .map((l) => l.trim())
         .filter((l) => l.length > 0),
-      driveFolderUrl: newDriveFolderUrl.trim() || undefined,
-      formUrl: newFormUrl.trim() || undefined,
+      // Mismo criterio que Enlaces y Recursos: sin http(s) se fuerza https:// (nunca un `javascript:` en un href).
+      driveFolderUrl: normalizeExternalUrl(newDriveFolderUrl),
+      formUrl: normalizeExternalUrl(newFormUrl),
     };
 
     onSaveCourse(courseObj);
@@ -649,7 +651,7 @@ export function TrainingSection({
                   <label className="block text-xs font-bold text-[#001428] mb-1">Modalidad</label>
                   <select
                     value={newModality}
-                    onChange={(e: any) => setNewModality(e.target.value)}
+                    onChange={(e) => setNewModality(e.target.value as typeof newModality)}
                     className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none bg-white"
                   >
                     <option value="Presencial">Presencial</option>
@@ -662,7 +664,7 @@ export function TrainingSection({
                   <label className="block text-xs font-bold text-[#001428] mb-1">Estado</label>
                   <select
                     value={newStatus}
-                    onChange={(e: any) => setNewStatus(e.target.value)}
+                    onChange={(e) => setNewStatus(e.target.value as typeof newStatus)}
                     className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none bg-white"
                   >
                     <option value="Inscripciones abiertas">Inscripciones abiertas</option>

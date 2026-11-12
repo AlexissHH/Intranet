@@ -22,11 +22,14 @@ import {
 } from 'lucide-react';
 import { getInstituteAreas, getInstitutionalSettings, DEFAULT_SETTINGS, type InstitutionalSettings } from '@/lib/storage';
 import type { InstituteAreaCard, InstituteAreaIconName } from '@/lib/mock-data';
+import type { IntranetSectionId } from '@/lib/access-config';
 
 interface InstituteSectionProps {
   onNavigateTab: (tab: string, subTab?: string) => void;
   isAdmin?: boolean;
   instSettings?: InstitutionalSettings;
+  /** Secciones habilitadas para el usuario: el acceso al Equipo solo aparece si esa sección está habilitada. */
+  canViewSection?: (section: IntranetSectionId) => boolean;
 }
 
 const ICON_MAP: Record<InstituteAreaIconName, React.ComponentType<{ className?: string }>> = {
@@ -44,7 +47,12 @@ const ICON_MAP: Record<InstituteAreaIconName, React.ComponentType<{ className?: 
   Landmark,
 };
 
-export function InstituteSection({ onNavigateTab, isAdmin, instSettings: propSettings }: InstituteSectionProps) {
+export function InstituteSection({
+  onNavigateTab,
+  isAdmin,
+  instSettings: propSettings,
+  canViewSection = () => true,
+}: InstituteSectionProps) {
   const [areas, setAreas] = useState<InstituteAreaCard[]>(() => getInstituteAreas());
   const [internalSettings, setInternalSettings] = useState<InstitutionalSettings>(() => propSettings || getInstitutionalSettings());
 
@@ -209,13 +217,15 @@ export function InstituteSection({ onNavigateTab, isAdmin, instSettings: propSet
             </h2>
           </div>
           <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
-            <button
-              onClick={() => onNavigateTab('equipo')}
-              className="text-xs font-semibold text-slate-600 hover:text-[#001428] hover:underline flex items-center gap-1 cursor-pointer"
-            >
-              <span>Ver Directorio & Equipo</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
+            {canViewSection('equipo') && (
+              <button
+                onClick={() => onNavigateTab('equipo')}
+                className="text-xs font-semibold text-slate-600 hover:text-[#001428] hover:underline flex items-center gap-1 cursor-pointer"
+              >
+                <span>Ver Directorio & Equipo</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
         </div>
 

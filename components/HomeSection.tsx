@@ -74,6 +74,7 @@ function parseNewsDateToYmd(raw?: string): string | null {
 import { getInstitutionalSettings, DEFAULT_SETTINGS, type InstitutionalSettings, type MetricGoalSettings, getTrainingResults } from '@/lib/storage';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
+import type { IntranetSectionId } from '@/lib/access-config';
 
 interface HomeSectionProps {
   activities: ActivityItem[];
@@ -91,6 +92,11 @@ interface HomeSectionProps {
   onDeleteNews?: (id: string) => void;
   hasCalendarAuth: boolean;
   isAdmin?: boolean;
+  /**
+   * Secciones habilitadas para el usuario. Las tarjetas y accesos de Inicio que pertenecen a otra sección
+   * (agenda, recursos, equipo, enlaces) solo se muestran si esa sección está habilitada.
+   */
+  canViewSection?: (section: IntranetSectionId) => boolean;
 }
 
 function getLinkIconData(type?: string) {
@@ -125,6 +131,7 @@ export function HomeSection({
   onSaveNews,
   onDeleteNews,
   isAdmin = false,
+  canViewSection = () => true,
 }: HomeSectionProps) {
   const [selectedNews, setSelectedNews] = useState<NewsItem | null>(null);
   const [instSettings, setInstSettings] = useState<InstitutionalSettings>(DEFAULT_SETTINGS);
@@ -350,13 +357,15 @@ export function HomeSection({
             >
               Leer comunicado
             </button>
-            <button
-              onClick={() => onNavigateTab('recursos')}
-              className="text-[#0284c7] font-semibold hover:underline flex items-center gap-1 cursor-pointer"
-            >
-              <span>Ver resoluciones</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
+            {canViewSection('recursos') && (
+              <button
+                onClick={() => onNavigateTab('recursos')}
+                className="text-[#0284c7] font-semibold hover:underline flex items-center gap-1 cursor-pointer"
+              >
+                <span>Ver resoluciones</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -466,7 +475,7 @@ export function HomeSection({
         )}
       </section>
 
-      {upcomingBirthdays.length > 0 && (
+      {canViewSection('equipo') && upcomingBirthdays.length > 0 && (
         <div className="bg-gradient-to-r from-amber-500/10 via-rose-500/10 to-amber-500/10 border border-amber-300 rounded-lg p-4 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-full bg-amber-100 border border-amber-300 flex items-center justify-center text-amber-700 shrink-0">
@@ -500,6 +509,7 @@ export function HomeSection({
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         <div className="lg:col-span-8 space-y-6">
+          {canViewSection('agenda') && (
           <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-3.5 sm:p-6 space-y-3.5 sm:space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2 min-w-0">
@@ -634,6 +644,7 @@ export function HomeSection({
               </div>
             )}
           </div>
+          )}
 
           <div id="seccion-novedades" className="bg-white rounded-lg border border-slate-200 shadow-xs p-5 sm:p-6 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
@@ -743,12 +754,14 @@ export function HomeSection({
                               >
                                 Ver Detalle & Comunicado
                               </button>
-                              <button
-                                onClick={() => onNavigateTab('recursos')}
-                                className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded transition-colors cursor-pointer"
-                              >
-                                Descargar Resolución
-                              </button>
+                              {canViewSection('recursos') && (
+                                <button
+                                  onClick={() => onNavigateTab('recursos')}
+                                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded transition-colors cursor-pointer"
+                                >
+                                  Descargar Resolución
+                                </button>
+                              )}
                               {isAdmin && (onSaveNews || onDeleteNews) && (
                                 <div className="ml-auto flex items-center gap-1">
                                   <NewsAdminActions
@@ -852,7 +865,7 @@ export function HomeSection({
             <div className="flex items-center justify-between text-xs text-slate-300">
               <span className="uppercase tracking-wider font-extrabold text-[10px] text-sky-400 flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                GESTIÓN {new Date().getFullYear()} • EN VIVO
+                GESTIÓN {metrics.currentYear} • EN VIVO
               </span>
               <BarChart3 className="w-4 h-4 text-sky-400" />
             </div>
@@ -979,6 +992,7 @@ export function HomeSection({
             </div>
           </div>
 
+          {canViewSection('agenda') && (
           <div className="bg-white rounded-lg border border-slate-200 shadow-xs p-5 space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
@@ -1083,7 +1097,9 @@ export function HomeSection({
               Ver Calendario Mensual Completo
             </button>
           </div>
+          )}
 
+          {canViewSection('enlaces') && (
           <div className="bg-white rounded-lg border border-slate-200 shadow-xs p-5 space-y-4">
             <div className="pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
@@ -1143,6 +1159,7 @@ export function HomeSection({
               <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
             </button>
           </div>
+          )}
         </div>
       </div>
 

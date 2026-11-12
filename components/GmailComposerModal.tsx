@@ -5,6 +5,7 @@ import { Mail, Send, X, AlertCircle, CheckCircle2, Loader2, ExternalLink } from 
 import { sendGmailMessage, WorkspaceAuthError } from '@/lib/workspace';
 import { getInstitutionalSettings } from '@/lib/storage';
 import { UserProfile } from '@/lib/auth';
+import { getErrorMessage } from '@/lib/utils';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
 
@@ -124,11 +125,11 @@ export function GmailComposerModal({
           closeTimerRef.current = setTimeout(() => {
             onClose();
           }, 2000);
-        } catch (err: any) {
+        } catch (err) {
           if (err instanceof WorkspaceAuthError) onAuthExpired?.();
           setStatusMessage({
             type: 'error',
-            text: err?.message || 'Error al enviar el correo mediante Gmail',
+            text: getErrorMessage(err, 'Error al enviar el correo mediante Gmail'),
           });
         } finally {
           setIsSending(false);

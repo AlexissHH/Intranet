@@ -28,6 +28,7 @@ import {
   USERS_STORAGE_KEY,
   APPROVAL_MODE_KEY,
 } from '@/lib/auth';
+import { getErrorMessage } from '@/lib/utils';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
 
@@ -134,9 +135,9 @@ export function UserManagementModal({
     }
     try {
       addAuthorizedEmployee(email, newName.trim());
-    } catch (err: any) {
+    } catch (err) {
       setSuccessMessage(null);
-      setErrorMessage(err?.message || 'No se pudo autorizar al integrante.');
+      setErrorMessage(getErrorMessage(err, 'No se pudo autorizar al integrante.'));
       return;
     }
     setNewEmail('');

@@ -64,3 +64,48 @@ export function isAllowedVisitorEmail(email?: string | null): boolean {
   const clean = normalizeEmail(email);
   return clean !== '' && ALLOWED_VISITOR_EMAILS.includes(clean);
 }
+
+/* ── Secciones visibles por usuario ───────────────────────────────────────── */
+
+/**
+ * Secciones de la intranet que Administración puede habilitar u ocultar a cada usuario visitante
+ * (campo opcional `allowedSections` de su ficha en authorized_users). El Panel de Administración no
+ * figura: solo lo ven los administradores, que además ven todas las secciones.
+ *
+ * Importante: es una preferencia de PRESENTACIÓN. Oculta pestañas, tarjetas y accesos, pero no es una
+ * barrera de acceso a los datos: las reglas de Firestore siguen dejando leer el contenido a todo usuario
+ * aprobado.
+ */
+export const INTRANET_SECTIONS = [
+  { id: 'inicio', label: 'Inicio' },
+  { id: 'instituto', label: 'Instituto' },
+  { id: 'capacitacion', label: 'Capacitación' },
+  { id: 'programas', label: 'Programas y Proyectos' },
+  { id: 'agenda', label: 'Agenda' },
+  { id: 'recursos', label: 'Recursos' },
+  { id: 'equipo', label: 'Equipo' },
+  { id: 'enlaces', label: 'Enlaces' },
+] as const;
+
+export type IntranetSectionId = (typeof INTRANET_SECTIONS)[number]['id'];
+
+const INTRANET_SECTION_IDS: readonly string[] = INTRANET_SECTIONS.map((s) => s.id);
+
+export function isIntranetSectionId(value: unknown): value is IntranetSectionId {
+  return typeof value === 'string' && INTRANET_SECTION_IDS.includes(value);
+}
+
+/**
+ * Normaliza el campo guardado: devuelve las secciones válidas en el orden del menú, o `undefined` si el
+ * campo no existe o no es una lista (sin restricción: el usuario ve todas las secciones).
+ */
+export function parseAllowedSections(raw: unknown): IntranetSectionId[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const wanted = new Set(raw.filter(isIntranetSectionId));
+  return INTRANET_SECTIONS.map((s) => s.id).filter((id) => wanted.has(id));
+}
+
+/** true si la lista habilita todas las secciones (equivale a no tener restricción). */
+export function coversAllSections(sections: readonly IntranetSectionId[]): boolean {
+  return INTRANET_SECTIONS.every((s) => sections.includes(s.id));
+}

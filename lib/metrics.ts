@@ -119,6 +119,41 @@ export function getActualAttendees(act: ActivityItem): number | undefined {
   return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
 }
 
+/** Contadores del listado de solicitudes de visita (todas, sin filtro de período). */
+export interface VisitRequestSummary {
+  pendientes: number;
+  /** Confirmadas, en curso o finalizadas (según el estado guardado de la solicitud). */
+  confirmadas: number;
+  canceladas: number;
+  /** Suma de la cantidad ESTIMADA al agendar, sin las canceladas. */
+  alumnosEstimados: number;
+  /** Suma de la asistencia REAL cargada. */
+  alumnosAsistieron: number;
+}
+
+/**
+ * Resumen del listado de visitas escolares de Administración. No es la métrica del período (eso es
+ * `computeVisitMetrics`): cuenta todas las solicitudes cargadas, por su estado guardado.
+ */
+export function summarizeVisitRequests(activities: ActivityItem[]): VisitRequestSummary {
+  const result: VisitRequestSummary = {
+    pendientes: 0,
+    confirmadas: 0,
+    canceladas: 0,
+    alumnosEstimados: 0,
+    alumnosAsistieron: 0,
+  };
+  for (const act of activities) {
+    if (act.type !== 'visita') continue;
+    if (act.status === 'pendiente') result.pendientes += 1;
+    else if (act.status === 'confirmada' || act.status === 'en_curso' || act.status === 'finalizada') result.confirmadas += 1;
+    else if (act.status === 'cancelada') result.canceladas += 1;
+    if (act.status !== 'cancelada') result.alumnosEstimados += getEstimatedAttendees(act) ?? 0;
+    result.alumnosAsistieron += getActualAttendees(act) ?? 0;
+  }
+  return result;
+}
+
 export function computeVisitMetrics(
   activities: ActivityItem[],
   period: MetricPeriod | MetricPeriodRef | undefined,

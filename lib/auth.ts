@@ -15,7 +15,7 @@ import {
   type Auth,
   type User,
 } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { deleteField, doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import defaultFirebaseConfig from '../firebase-applet-config.json';
 import {
   MASTER_ADMIN_EMAIL,
@@ -25,8 +25,11 @@ import {
   VISITOR_TEST_EMAIL,
   isMasterAdminEmail,
   isAllowedVisitorEmail,
+  coversAllSections,
+  parseAllowedSections,
+  type IntranetSectionId,
 } from './access-config';
-import { generateId } from './utils';
+import { generateId, getLocalDateString } from './utils';
 import {
   deleteSingleDoc,
   ensureFirestoreReady,
@@ -336,6 +339,11 @@ export interface AuthorizedUser {
   status: UserStatus;
   createdAt: string;
   approvedAt?: string;
+  /**
+   * Secciones que este visitante ve (las elige Administración en Acreditaciones). Sin el campo, ve todas.
+   * No aplica a administradores. Es solo presentación: no restringe la lectura de datos (ver INTRANET_SECTIONS).
+   */
+  allowedSections?: IntranetSectionId[];
 }
 
 export interface UserProfile {
@@ -445,11 +453,46 @@ function userDocId(u: Record<string, unknown>): string {
   return typeof u.email === 'string' ? u.email.toLowerCase().trim() : '';
 }
 
+/*
+ * Un visitante no escucha la lista de usuarios, pero sí SU PROPIA ficha (las reglas le permiten leerla): así,
+ * cuando Administración cambia sus secciones visibles, el cambio le llega en tiempo real sin volver a ingresar.
+ */
+let ownUserDocUnsub: (() => void) | null = null;
+let ownUserDocEmail = '';
+
+function stopOwnUserDocSync(): void {
+  ownUserDocUnsub?.();
+  ownUserDocUnsub = null;
+  ownUserDocEmail = '';
+}
+
+function ensureOwnUserDocSync(): void {
+  if (typeof window === 'undefined' || !isSyncGateOpen()) return;
+  const identity = getSyncIdentity();
+  if (!identity || identity.isAdmin) {
+    stopOwnUserDocSync();
+    return;
+  }
+  if (ownUserDocUnsub && ownUserDocEmail === identity.email) return;
+  stopOwnUserDocSync();
+  const email = identity.email;
+  const subscription = subscribeToSingleDoc(AUTHORIZED_USERS_COLLECTION, email, (remote, exists) => {
+    if (!exists || getSyncIdentity()?.email !== email) return;
+    const data = (remote ?? {}) as Record<string, unknown>;
+    setLocalAllowedSections(email, parseAllowedSections(data.allowedSections));
+  });
+  if (subscription) {
+    ownUserDocUnsub = subscription;
+    ownUserDocEmail = email;
+  }
+}
+
 // Sin sesión aprobada los listeners se quedan cerrados; al loguear, el gate los re-abre.
 if (typeof window !== 'undefined') {
   registerGateOpenHandler(() => {
     ensureUsersSync();
     ensureApprovalModeSync();
+    ensureOwnUserDocSync();
   });
 }
 
@@ -460,6 +503,7 @@ function applySyncGate(authorized: boolean): void {
   if (!authorized) {
     usersSyncStarted = false;
     approvalModeSyncStarted = false;
+    stopOwnUserDocSync();
   }
   // Quién tiene la sesión: algunas lecturas (course_audits) se filtran por el email del propio usuario.
   const profile = authorized ? cachedUserProfile : null;
@@ -475,9 +519,10 @@ function applySyncGate(authorized: boolean): void {
       : null
   );
   setFirestoreSyncGate(authorized);
-  // Un solo diagnóstico de acceso por sesión, con la sesión ADMIN:
-  // distingue "reglas no visibles para esta app/base" de "cuenta no admin".
-  if (authorized && !diagnosticsRan) {
+  // Un solo diagnóstico de acceso por sesión, SOLO con sesión de administrador:
+  // distingue "reglas no visibles para esta app/base" de "cuenta no admin". Con un visitante la prueba de
+  // escritura siempre falla y mostraba un aviso de error que no le corresponde.
+  if (authorized && profile?.role === 'administrador' && !diagnosticsRan) {
     diagnosticsRan = true;
     void runAccessDiagnostics(cachedUserProfile?.email ?? '');
   }
@@ -500,7 +545,98 @@ function materializeRemoteUser(doc: Record<string, unknown>): AuthorizedUser | n
     status: isMasterAdminEmail(email) ? 'aprobado' : status,
     createdAt: typeof doc.createdAt === 'string' ? doc.createdAt : '2026-01-01',
     ...(typeof doc.approvedAt === 'string' ? { approvedAt: doc.approvedAt } : {}),
+    // Se conserva: la lista del administrador se reescribe entera al aprobar/rechazar (pushCollectionDiff),
+    // y perder el campo aquí borraría la configuración de secciones en la base.
+    ...withAllowedSections(parseAllowedSections(doc.allowedSections)),
   };
+}
+
+function withAllowedSections(
+  sections: IntranetSectionId[] | undefined
+): Pick<AuthorizedUser, 'allowedSections'> | Record<string, never> {
+  return sections ? { allowedSections: sections } : {};
+}
+
+/** Actualiza en la caché local SOLO las secciones visibles de un usuario (las quita si no hay restricción). */
+function setLocalAllowedSections(email: string, sections: IntranetSectionId[] | undefined): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const clean = email.trim().toLowerCase();
+    const users = getAuthorizedUsers();
+    const idx = users.findIndex((u) => u.email.toLowerCase().trim() === clean);
+    if (idx < 0) return;
+    const { allowedSections: previous, ...rest } = users[idx];
+    if (JSON.stringify(previous) === JSON.stringify(sections)) return;
+    users[idx] = { ...rest, ...withAllowedSections(sections) };
+    localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+    notifyAuthorizedUsersChanged();
+  } catch {
+    // Ignore (la caché local es solo una ayuda)
+  }
+}
+
+/**
+ * Secciones visibles de un usuario según la caché local (`undefined` = sin restricción, ve todas).
+ * Para un visitante, la caché se mantiene al día con la escucha de su propia ficha.
+ * Solo lee (no siembra ni escribe la caché), así se puede usar al renderizar.
+ */
+export function getUserAllowedSections(email: string): IntranetSectionId[] | undefined {
+  const clean = email.trim().toLowerCase();
+  if (typeof window === 'undefined' || !clean || isMasterAdminEmail(clean)) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(USERS_STORAGE_KEY) || '[]');
+    if (!Array.isArray(parsed)) return undefined;
+    const found: unknown = parsed.find(
+      (u: unknown) =>
+        typeof u === 'object' && u !== null &&
+        typeof (u as { email?: unknown }).email === 'string' &&
+        (u as { email: string }).email.toLowerCase().trim() === clean
+    );
+    if (!found || (found as { role?: unknown }).role === 'administrador') return undefined;
+    return parseAllowedSections((found as { allowedSections?: unknown }).allowedSections);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Correos de los usuarios APROBADOS (para invitarlos a un evento de Google Calendar), sin repetir y sin el de
+ * `excludeEmail` (quien organiza el evento). Solo es completa para un administrador, que es el único que
+ * recibe la lista entera; para un visitante la caché solo tiene su propia ficha.
+ */
+export function getApprovedUserEmails(excludeEmail = ''): string[] {
+  const skip = excludeEmail.trim().toLowerCase();
+  const emails = new Set<string>();
+  for (const u of getAuthorizedUsers()) {
+    const email = (u.email ?? '').trim().toLowerCase();
+    if (u.status === 'aprobado' && BASIC_EMAIL_RE.test(email) && email !== skip) emails.add(email);
+  }
+  return [...emails];
+}
+
+/**
+ * Administración: define qué secciones ve un visitante. Elegir todas quita la restricción (se borra el campo),
+ * de modo que una sección nueva de la intranet también le aparezca. Escribe solo ese campo de su ficha y
+ * actualiza la caché local cuando la base confirma; si falla, lanza el error y no cambia nada.
+ */
+export async function setUserAllowedSections(email: string, sections: readonly IntranetSectionId[]): Promise<void> {
+  const clean = email.trim().toLowerCase();
+  const target = getAuthorizedUsers().find((u) => u.email.toLowerCase().trim() === clean);
+  if (!target) throw new Error('No se encontró a este usuario en la lista.');
+  if (target.role === 'administrador' || isMasterAdminEmail(clean)) {
+    throw new Error('Los administradores ven todas las secciones.');
+  }
+  const normalized = parseAllowedSections(sections) ?? [];
+  if (normalized.length === 0) throw new Error('Elige al menos una sección.');
+  const next = coversAllSections(normalized) ? undefined : normalized;
+
+  const database = await ensureFirestoreReady();
+  if (!database) throw new Error('No hay conexión con la base compartida. Intenta de nuevo en unos segundos.');
+  // updateDoc (no setDoc): la ficha debe existir; no se crean fichas nuevas desde aquí.
+  await updateDoc(doc(database, AUTHORIZED_USERS_COLLECTION, clean), {
+    allowedSections: next ?? deleteField(),
+  });
+  setLocalAllowedSections(clean, next);
 }
 
 /**
@@ -724,7 +860,7 @@ export function approveUser(userId: string): AuthorizedUser[] {
       updatedRecord = {
         ...u,
         status: 'aprobado' as UserStatus,
-        approvedAt: new Date().toISOString().split('T')[0],
+        approvedAt: getLocalDateString(),
       };
       return updatedRecord;
     }
@@ -812,7 +948,7 @@ export function addAuthorizedEmployee(email: string, displayName: string): Autho
   const cleanName = displayName.trim() || cleanEmail.split('@')[0];
 
   const existingIndex = users.findIndex((u) => u.email.toLowerCase() === cleanEmail);
-  const now = new Date().toISOString().split('T')[0];
+  const now = getLocalDateString();
 
   let savedRecord: AuthorizedUser;
   if (existingIndex >= 0) {
@@ -899,7 +1035,7 @@ export function checkUserAuthorization(email: string, displayName: string): Auth
 
   const users = getAuthorizedUsers();
   const found = users.find((u) => u.email.toLowerCase() === cleanEmail);
-  const now = new Date().toISOString().split('T')[0];
+  const now = getLocalDateString();
 
   if (found) {
     if (found.status === 'aprobado') {
@@ -1004,7 +1140,7 @@ export async function syncAndCheckUserInFirestore(
   }
 
   const displayName = fallbackDisplayName?.trim() || firebaseUser.displayName?.trim() || cleanEmail.split('@')[0];
-  const now = new Date().toISOString().split('T')[0];
+  const now = getLocalDateString();
 
   try {
     const database = await ensureFirestoreReady();
@@ -1028,6 +1164,8 @@ export async function syncAndCheckUserInFirestore(
           ...(typeof data.approvedAt === 'string' ? { approvedAt: data.approvedAt } : {}),
         };
         updateLocalUserRecord(record);
+        // Reemplaza (no mezcla) las secciones visibles: si Administración quitó la restricción, se quita aquí.
+        setLocalAllowedSections(cleanEmail, parseAllowedSections(data.allowedSections));
 
         if (status === 'aprobado') {
           return { authorized: true, role, status: 'aprobado' };

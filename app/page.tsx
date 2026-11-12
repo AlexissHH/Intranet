@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   initAuth,
   logout,
@@ -12,14 +12,19 @@ import {
   touchSession,
   isSessionExpired,
   isMasterAdminEmail,
+  getUserAllowedSections,
+  getApprovedUserEmails,
   type UserProfile,
 } from '@/lib/auth';
+import { INTRANET_SECTIONS, isIntranetSectionId } from '@/lib/access-config';
 import {
   createCalendarEvent,
+  updateCalendarEvent,
   createGoogleSheet,
   DEFAULT_SHEET_TAB_TITLE,
   appendRowsToSheet,
   WorkspaceAuthError,
+  WorkspaceNotFoundError,
   type CalendarEventPayload,
 } from '@/lib/workspace';
 import {
@@ -31,6 +36,7 @@ import {
   getActivities,
   initSharedBackend,
   saveActivity,
+  saveActivities,
   deleteActivity,
   getNews,
   saveNews,
@@ -64,7 +70,14 @@ import {
   QuickLink,
   TeamMember,
 } from '@/lib/mock-data';
-import { getLocalDateString, getBirthdayCountdown, buildSafeIsoDateTime, exportActivitiesToCsv } from '@/lib/utils';
+import {
+  getLocalDateString,
+  getBirthdayCountdown,
+  buildSafeIsoDateTime,
+  exportActivitiesToCsv,
+  getErrorMessage,
+  getInstitutionalTodayParts,
+} from '@/lib/utils';
 
 import { Header } from '@/components/Header';
 import { WorkspaceBanner } from '@/components/WorkspaceBanner';
@@ -79,6 +92,7 @@ import { TeamSection } from '@/components/TeamSection';
 import { LinksSection } from '@/components/LinksSection';
 import { AdminSection } from '@/components/AdminSection';
 import { QuickActionsModal } from '@/components/QuickActionsModal';
+import { CalendarImportModal } from '@/components/CalendarImportModal';
 import { GeminiAssistantModal } from '@/components/GeminiAssistantModal';
 import { GmailComposerModal } from '@/components/GmailComposerModal';
 import { ConfirmationModal } from '@/components/ConfirmationModal';
@@ -109,10 +123,12 @@ function buildActivityCalendarEvent(act: ActivityItem): CalendarEventPayload {
   }
   return {
     summary: act.title,
-    description: `${act.description || ''}\n\nResponsable: ${act.responsible || 'Coordinación'}\nUbicación: ${act.location || DEFAULT_EVENT_LOCATION}`,
+    // Sin el responsable: un evento de Calendar puede compartirse con terceros y no lleva datos personales.
+    description: `${act.description || ''}\n\nUbicación: ${act.location || DEFAULT_EVENT_LOCATION}`,
     location: act.location || DEFAULT_EVENT_LOCATION,
     startDateTime: startIso,
     endDateTime: endIso,
+    activityId: act.id,
   };
 }
 
@@ -130,12 +146,28 @@ function buildBirthdayCalendarEvent(member: TeamMember, nextDateStr: string): Ca
   };
 }
 
-function isGoogleAuthError(err: any): boolean {
+function isGoogleAuthError(err: unknown): boolean {
   return (
     err instanceof WorkspaceAuthError ||
-    err?.message?.includes('invalid authentication credentials') ||
-    err?.status === 401
+    getErrorMessage(err, '').includes('invalid authentication credentials') ||
+    (err as { status?: unknown } | null)?.status === 401
   );
+}
+
+const ADMIN_SUB_TABS = [
+  'visitas',
+  'objetivos',
+  'auditoria_cursos',
+  'cards_instituto',
+  'institucional',
+  'usuarios',
+  'contenidos',
+  'mantenimiento',
+] as const;
+type AdminSubTab = (typeof ADMIN_SUB_TABS)[number];
+
+function isAdminSubTab(value: string): value is AdminSubTab {
+  return (ADMIN_SUB_TABS as readonly string[]).includes(value);
 }
 
 export default function IntranetApp() {
@@ -143,9 +175,7 @@ export default function IntranetApp() {
   const [globalSearch, setGlobalSearch] = useState<string>('');
   const [agendaTargetDate, setAgendaTargetDate] = useState<Date | undefined>(undefined);
   const [agendaTargetView, setAgendaTargetView] = useState<'dia' | 'semana' | 'mes' | 'lista' | undefined>(undefined);
-  const [adminTargetSubTab, setAdminTargetSubTab] = useState<
-    'visitas' | 'objetivos' | 'auditoria_cursos' | 'cards_instituto' | 'institucional' | 'usuarios' | 'contenidos' | 'mantenimiento' | undefined
-  >(undefined);
+  const [adminTargetSubTab, setAdminTargetSubTab] = useState<AdminSubTab | undefined>(undefined);
 
   // Estado inicial vacío (sin datos de prueba); se completa con reloadData desde el storage.
   const [activities, setActivities] = useState<ActivityItem[]>([]);
@@ -171,7 +201,39 @@ export default function IntranetApp() {
   const [isUserManagementOpen, setIsUserManagementOpen] = useState(false);
   const [pendingApprovalsCount, setPendingApprovalsCount] = useState<number>(0);
 
+  /*
+   * Secciones visibles para el usuario (las define Administración en Acreditaciones). Lo que no está
+   * habilitado no aparece en ningún lado: ni pestañas, ni tarjetas o accesos de otras secciones, sin avisos
+   * de bloqueo. Se recalcula con cada cambio de la caché de usuarios (llega en tiempo real desde la base).
+   * Es presentación, no seguridad: los datos siguen protegidos (o no) por firestore.rules.
+   */
+  const [usersCacheVersion, setUsersCacheVersion] = useState(0);
+  const allowedSections = useMemo(
+    () => (user && user.role !== 'administrador' ? getUserAllowedSections(user.email) : undefined),
+    // usersCacheVersion: la caché de usuarios vive en localStorage; el contador fuerza la relectura.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [user, usersCacheVersion]
+  );
+  const canViewSection = useCallback(
+    (tab: string): boolean => {
+      // Sin sesión cada sección muestra su propio acceso restringido (comportamiento previo).
+      if (!user) return true;
+      if (tab === 'admin') return user.role === 'administrador';
+      if (user.role === 'administrador' || !allowedSections) return true;
+      return isIntranetSectionId(tab) ? allowedSections.includes(tab) : true;
+    },
+    [user, allowedSections]
+  );
+  /** Única vía de navegación entre secciones: un acceso a una sección no habilitada no hace nada. */
+  const navigateTab = useCallback(
+    (tab: string) => {
+      if (canViewSection(tab)) setActiveTab(tab);
+    },
+    [canViewSection]
+  );
+
   const [isQuickActionsOpen, setIsQuickActionsOpen] = useState(false);
+  const [isCalendarImportOpen, setIsCalendarImportOpen] = useState(false);
   const [quickActionInitial, setQuickActionInitial] = useState<'visita' | 'actividad' | 'novedad'>('visita');
   const [quickActionInitialDate, setQuickActionInitialDate] = useState<string | undefined>(undefined);
   const pendingCalendarSyncRef = React.useRef<ActivityItem | null>(null);
@@ -219,7 +281,7 @@ export default function IntranetApp() {
       if (base.includes('bloqueó')) {
         const email = user?.email?.toLowerCase() ?? '';
         if (user?.provider === 'institucional') {
-          hint = ' Ingresaste SIN Google (modo institucional): Firestore exige sesión de Google; usá "Continuar con Google".';
+          hint = ' Ingresaste SIN Google (modo institucional): Firestore exige sesión de Google; usa "Continuar con Google".';
         } else if (!email) {
           hint = ' Además: no hay sesión iniciada con Google.';
         } else {
@@ -229,7 +291,7 @@ export default function IntranetApp() {
             (record?.role === 'administrador' && record?.status === 'aprobado');
           hint = isAdminNow
             ? ` Tu sesión (${email}) sí es administrador: casi seguro las reglas de firestore.rules no están publicadas aún en la consola de Firebase.`
-            : ` Tu sesión (${email}) NO figura como administrador aprobado: iniciá sesión con una cuenta maestra o pedí tu aprobación a un admin.`;
+            : ` Tu sesión (${email}) NO figura como administrador aprobado: inicia sesión con una cuenta maestra o pide tu aprobación a un administrador.`;
         }
       }
       showToast('error', base + hint);
@@ -308,6 +370,7 @@ export default function IntranetApp() {
       if (!e.key || e.key.startsWith('icl_intranet_')) {
         reloadData();
         setPendingApprovalsCount(getAuthorizedUsers().filter((u) => u.status === 'pendiente').length);
+        setUsersCacheVersion((v) => v + 1);
       }
     };
     window.addEventListener('storage', handleStorageChange);
@@ -413,9 +476,9 @@ export default function IntranetApp() {
       const pendingAct = pendingCalendarSyncRef.current;
       pendingCalendarSyncRef.current = null;
       try {
-        await createCalendarEvent(token, buildActivityCalendarEvent(pendingAct));
-        showToast('success', `¡"${pendingAct.title}" agendada con éxito en Google Calendar!`);
-      } catch (err: any) {
+        const outcome = await pushActivityToCalendar(token, pendingAct, profile);
+        showToast('success', calendarSyncSuccessMessage(pendingAct.title, outcome));
+      } catch (err) {
         console.error('Pending sync execution error:', err);
         showToast(
           'error',
@@ -423,6 +486,57 @@ export default function IntranetApp() {
         );
       }
     }
+  };
+
+  /**
+   * Agenda la actividad en el Google Calendar de `actor` o, si ya está vinculada a un evento de esa cuenta,
+   * lo actualiza. Si el actor es administrador, los usuarios aprobados reciben el evento en su propio calendario
+   * (sin email); un visitante solo lo agenda en el suyo. El vínculo (id del evento y cuenta dueña) se guarda
+   * en la actividad, por `lib/storage`, solo cuando lo hace un administrador.
+   */
+  const pushActivityToCalendar = async (
+    token: string,
+    act: ActivityItem,
+    actor: Pick<UserProfile, 'email' | 'role'>
+  ): Promise<'creada' | 'actualizada'> => {
+    const isAdminActor = actor.role === 'administrador';
+    const actorEmail = actor.email.trim().toLowerCase();
+    const payload: CalendarEventPayload = {
+      ...buildActivityCalendarEvent(act),
+      ...(isAdminActor ? { attendees: getApprovedUserEmails(actorEmail) } : {}),
+    };
+
+    if (act.calendarEventId) {
+      await updateCalendarEvent(token, act.calendarEventId, payload);
+      if (isAdminActor && !act.calendarOwnerEmail) {
+        setActivities(saveActivity({ ...(getActivities().find((a) => a.id === act.id) ?? act), calendarOwnerEmail: actorEmail }));
+      }
+      return 'actualizada';
+    }
+
+    const created = await createCalendarEvent(token, payload);
+    if (isAdminActor && created.id) {
+      const latest = getActivities().find((a) => a.id === act.id) ?? act;
+      setActivities(saveActivity({ ...latest, calendarEventId: created.id, calendarOwnerEmail: actorEmail }));
+    }
+    return 'creada';
+  };
+
+  const calendarSyncSuccessMessage = (title: string, outcome: 'creada' | 'actualizada'): string =>
+    outcome === 'actualizada'
+      ? `¡"${title}" actualizada en Google Calendar!`
+      : `¡"${title}" agendada con éxito en Google Calendar!`;
+
+  /** Motivo por el que `actor` no puede tocar el evento de Calendar vinculado a la actividad (null = puede). */
+  const getCalendarLinkBlocker = (act: ActivityItem, actor: Pick<UserProfile, 'email' | 'role'>): string | null => {
+    if (!act.calendarEventId) return null;
+    if (actor.role !== 'administrador') {
+      return 'Esta actividad ya está en Google Calendar: la agendó un administrador y te llega a tu calendario.';
+    }
+    if (act.calendarOwnerEmail && act.calendarOwnerEmail.toLowerCase() !== actor.email.trim().toLowerCase()) {
+      return 'Esta actividad está en el Google Calendar de otra cuenta de administración. Actualízala desde esa cuenta.';
+    }
+    return null;
   };
 
   const requestWorkspaceConfirmation = (
@@ -442,9 +556,9 @@ export default function IntranetApp() {
         setIsConfirmLoading(true);
         try {
           await action();
-        } catch (e: any) {
+        } catch (e) {
           console.error(e);
-          showToast('error', e?.message || 'Error al ejecutar la acción.');
+          showToast('error', getErrorMessage(e, 'Error al ejecutar la acción.'));
         } finally {
           setIsConfirmLoading(false);
           setConfirmationState((prev) => ({ ...prev, isOpen: false }));
@@ -453,8 +567,48 @@ export default function IntranetApp() {
     });
   };
 
+  /** Importación puntual desde Google Calendar (solo administradores): abre la vista previa editable. */
+  const handleOpenCalendarImport = async () => {
+    if (!checkAdminPermission('importar actividades desde Google Calendar')) return;
+    let token = accessToken;
+    if (!token || isStoredTokenExpired()) {
+      token = await getAccessToken();
+      if (token) setAccessToken(token);
+    }
+    if (!token) {
+      openLogin(true);
+      showToast('error', 'Conecta tu cuenta de Google Workspace para leer el calendario.');
+      return;
+    }
+    setIsCalendarImportOpen(true);
+  };
+
+  const handleImportActivities = (items: ActivityItem[]) => {
+    if (!checkAdminPermission('importar actividades desde Google Calendar') || items.length === 0) return;
+    // El evento importado está en el calendario de la cuenta que dio el permiso de lectura: solo ella puede actualizarlo.
+    const ownerEmail = user?.email.trim().toLowerCase();
+    const updated = saveActivities(
+      ownerEmail ? items.map((a) => (a.calendarEventId ? { ...a, calendarOwnerEmail: ownerEmail } : a)) : items
+    );
+    setActivities(updated);
+    showToast(
+      'success',
+      `Se importaron ${items.length} ${items.length === 1 ? 'actividad' : 'actividades'} como pendientes. Revísalas en la agenda.`
+    );
+  };
+
   const handleSyncToCalendar = async (act: ActivityItem, skipConfirmation = false) => {
     // Both administrators and visitors can synchronize activities with Google Calendar
+    // Una actividad ya vinculada a un evento (importado o agendado antes) se ACTUALIZA, no se vuelve a crear.
+    if (user) {
+      const blocker = getCalendarLinkBlocker(act, user);
+      if (blocker) {
+        showToast('success', blocker);
+        return;
+      }
+    }
+    const isAdminUser = user?.role === 'administrador';
+    const isLinked = Boolean(act.calendarEventId);
     let token = accessToken;
     if (!token) {
       token = await getAccessToken();
@@ -471,11 +625,17 @@ export default function IntranetApp() {
 
     const executeCalendarSync = async () => {
       try {
-        await createCalendarEvent(token!, buildActivityCalendarEvent(act));
-        showToast('success', `¡"${act.title}" agendada con éxito en Google Calendar!`);
-      } catch (err: any) {
+        // Sin sesión no hay perfil: se agenda como visitante (solo en el calendario de quien conectó la cuenta).
+        const outcome = await pushActivityToCalendar(token!, act, user ?? { email: '', role: 'visitante' });
+        showToast('success', calendarSyncSuccessMessage(act.title, outcome));
+      } catch (err) {
         console.error('Google Calendar sync error:', err);
-        if (isGoogleAuthError(err)) {
+        if (err instanceof WorkspaceNotFoundError) {
+          showToast(
+            'error',
+            'No se encontró el evento en tu Google Calendar (se borró o está en otra cuenta). La actividad sigue guardada en el cronograma.'
+          );
+        } else if (isGoogleAuthError(err)) {
           setAccessToken(null);
           storeAccessToken(null);
           showToast(
@@ -483,7 +643,7 @@ export default function IntranetApp() {
             'La sincronización con Google Calendar requiere reconectar tu cuenta de Google. La actividad permanece guardada en el cronograma institucional.'
           );
         } else {
-          showToast('error', err?.message || 'Error al agendar en Google Calendar');
+          showToast('error', getErrorMessage(err, 'Error al agendar en Google Calendar'));
         }
       }
     };
@@ -491,14 +651,26 @@ export default function IntranetApp() {
     if (skipConfirmation) {
       await executeCalendarSync();
     } else {
+      const guestCount = isAdminUser ? getApprovedUserEmails(user?.email ?? '').length : 0;
       requestWorkspaceConfirmation(
-        '¿Agendar en Google Calendar?',
-        `Se creará un nuevo evento en tu calendario principal de Google Calendar para la actividad "${act.title}".`,
+        isLinked ? '¿Actualizar en Google Calendar?' : '¿Agendar en Google Calendar?',
+        `${
+          isLinked
+            ? `Se actualizará el evento de tu calendario principal de Google Calendar para la actividad "${act.title}"`
+            : `Se creará un nuevo evento en tu calendario principal de Google Calendar para la actividad "${act.title}"`
+        }${
+          guestCount > 0
+            ? ' y aparecerá en el calendario de los usuarios aprobados, sin enviarles un email por cada actividad.'
+            : '.'
+        }`,
         [
           { label: 'Actividad', value: act.title },
           { label: 'Fecha y Hora', value: `${act.date} de ${act.startTime} a ${act.endTime} hs` },
           { label: 'Ubicación', value: act.location },
           { label: 'Responsable', value: act.responsible },
+          ...(guestCount > 0
+            ? [{ label: 'Invitados', value: `${guestCount} ${guestCount === 1 ? 'usuario aprobado' : 'usuarios aprobados'}` }]
+            : []),
         ],
         executeCalendarSync
       );
@@ -557,7 +729,7 @@ export default function IntranetApp() {
             url: sheetUrl,
             label: 'Abrir Planilla',
           });
-        } catch (err: any) {
+        } catch (err) {
           if (isGoogleAuthError(err)) {
             setAccessToken(null);
             storeAccessToken(null);
@@ -565,7 +737,7 @@ export default function IntranetApp() {
             exportActivitiesToCsv(activities);
             showToast('success', 'El permiso de Google Sheets ha caducado. Se descargó automáticamente la planilla en formato CSV.');
           } else {
-            showToast('error', err?.message || 'Error al exportar a Google Sheets');
+            showToast('error', getErrorMessage(err, 'Error al exportar a Google Sheets'));
           }
         }
       }
@@ -602,11 +774,53 @@ export default function IntranetApp() {
     await handleSyncToCalendar(newAct, true);
   };
 
+  /**
+   * Si la actividad está vinculada a un evento de Google Calendar, lo refleja allí: cancelada → evento cancelado
+   * (desaparece del calendario de los invitados); en otro estado → evento activo y actualizado. Se hace DESPUÉS de
+   * guardar en la intranet y no la bloquea: si falla, la actividad queda guardada y se avisa qué no se actualizó.
+   */
+  const syncLinkedCalendarEvent = async (act: ActivityItem): Promise<void> => {
+    if (!user || !act.calendarEventId) return;
+    const blocker = getCalendarLinkBlocker(act, user);
+    if (blocker) {
+      showToast('error', `El estado se guardó, pero no se actualizó Google Calendar. ${blocker}`);
+      return;
+    }
+    let token = accessToken;
+    if (!token || isStoredTokenExpired()) {
+      token = await getAccessToken();
+      if (token) setAccessToken(token);
+    }
+    if (!token) {
+      showToast('error', 'El estado se guardó, pero no se actualizó Google Calendar porque falta conectar tu cuenta de Google.');
+      return;
+    }
+    try {
+      if (act.status === 'cancelada') {
+        await updateCalendarEvent(token, act.calendarEventId, buildActivityCalendarEvent(act), { cancelled: true });
+      } else {
+        await pushActivityToCalendar(token, act, user);
+      }
+    } catch (err) {
+      console.error('Google Calendar status sync error:', err);
+      showToast(
+        'error',
+        err instanceof WorkspaceNotFoundError
+          ? 'El estado se guardó, pero el evento no está en tu Google Calendar (se borró o está en otra cuenta).'
+          : isGoogleAuthError(err)
+          ? 'El estado se guardó, pero Google Calendar requiere reconectar tu cuenta para actualizarse.'
+          : `El estado se guardó, pero no se pudo actualizar Google Calendar: ${getErrorMessage(err, 'error desconocido')}`
+      );
+    }
+  };
+
   const handleUpdateActivityStatus = (id: string, status: ActivityItem['status'], reason?: string) => {
     if (!checkAdminPermission('modificar el estado de las actividades y visitas')) return;
 
     const updated = updateActivityStatus(id, status, reason);
     setActivities(updated);
+    const changed = updated.find((a) => a.id === id);
+    if (changed?.calendarEventId) void syncLinkedCalendarEvent(changed);
 
     if (status === 'confirmada') {
       showToast('success', '¡Visita escolar confirmada oficialmente!');
@@ -763,14 +977,14 @@ export default function IntranetApp() {
         try {
           await createCalendarEvent(token!, buildBirthdayCalendarEvent(member, countdown.nextDateStr));
           showToast('success', `¡Cumpleaños de ${member.name} agendado en Google Calendar con repetición anual!`);
-        } catch (err: any) {
+        } catch (err) {
           if (isGoogleAuthError(err)) {
             setAccessToken(null);
             storeAccessToken(null);
             openLogin(true);
             showToast('error', 'La sesión de Google Workspace ha expirado. Inicia sesión con Google para renovar permisos.');
           } else {
-            showToast('error', err?.message || 'Error al agendar cumpleaños');
+            showToast('error', getErrorMessage(err, 'Error al agendar cumpleaños'));
           }
         }
       }
@@ -810,7 +1024,7 @@ export default function IntranetApp() {
           try {
             await createCalendarEvent(token!, buildBirthdayCalendarEvent(member, countdown.nextDateStr));
             syncedCount++;
-          } catch (e: any) {
+          } catch (e) {
             if (isGoogleAuthError(e)) {
               setAccessToken(null);
               storeAccessToken(null);
@@ -822,7 +1036,8 @@ export default function IntranetApp() {
               return;
             }
             failedCount++;
-            console.error('Error syncing member birthday', member.name, e);
+            // Sin el nombre: los logs no llevan datos personales.
+            console.error('Error al agendar un cumpleaños del equipo:', e);
           }
         }
         const notes = [
@@ -852,12 +1067,13 @@ export default function IntranetApp() {
 
   const handleHeaderSearch = (query: string) => {
     setGlobalSearch(query);
-    if (query.trim() && activeTab === 'inicio') {
+    if (query.trim() && activeTab === 'inicio' && canViewSection('recursos')) {
       setActiveTab('recursos');
     }
   };
 
   const handleNavigateToAgendaDate = (dateStr: string, view: 'dia' | 'semana' | 'mes' | 'lista' = 'dia') => {
+    if (!canViewSection('agenda')) return;
     const parts = dateStr.split('-');
     const dObj = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
     if (parts.length !== 3 || Number.isNaN(dObj.getTime())) return;
@@ -875,11 +1091,20 @@ export default function IntranetApp() {
     }
   }, [activeTab]);
 
+  // Si la sección abierta deja de estar habilitada (o el usuario entra sin acceso a Inicio), se pasa en
+  // silencio a la primera sección que sí puede ver.
+  React.useEffect(() => {
+    if (!user || canViewSection(activeTab)) return;
+    const firstVisible = INTRANET_SECTIONS.find((s) => canViewSection(s.id));
+    if (firstVisible) setActiveTab(firstVisible.id);
+  }, [user, activeTab, canViewSection]);
+
   return (
     <div className="min-h-screen bg-[#f8fafc] text-[#001428] flex flex-col font-sans selection:bg-[#0284c7] selection:text-white">
       <Header
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={navigateTab}
+        canViewSection={canViewSection}
         user={user}
         onOpenLoginModal={() => openLogin()}
         onLogout={handleLogout}
@@ -905,7 +1130,7 @@ export default function IntranetApp() {
           />
         )}
 
-        {activeTab === 'inicio' && (
+        {activeTab === 'inicio' && canViewSection('inicio') && (
           user ? (
             <HomeSection
               activities={activities}
@@ -913,7 +1138,8 @@ export default function IntranetApp() {
               courses={courses}
               quickLinks={quickLinks}
               team={team}
-              onNavigateTab={setActiveTab}
+              onNavigateTab={navigateTab}
+              canViewSection={canViewSection}
               onNavigateToAgendaDate={handleNavigateToAgendaDate}
               onSaveNews={handleSaveNews}
               onDeleteNews={handleDeleteNews}
@@ -939,25 +1165,26 @@ export default function IntranetApp() {
             <RestrictedAccessView
               mode="home"
               onOpenLoginModal={() => openLogin()}
-              onNavigateTab={setActiveTab}
+              onNavigateTab={navigateTab}
             />
           )
         )}
 
-        {activeTab === 'instituto' && (
+        {activeTab === 'instituto' && canViewSection('instituto') && (
           <InstituteSection
             instSettings={instSettings}
+            canViewSection={canViewSection}
             onNavigateTab={(tab, subTab) => {
-              setActiveTab(tab);
-              if (tab === 'admin' && subTab) {
-                setAdminTargetSubTab(subTab as any);
+              navigateTab(tab);
+              if (tab === 'admin' && subTab && isAdminSubTab(subTab)) {
+                setAdminTargetSubTab(subTab);
               }
             }}
             isAdmin={user?.role === 'administrador'}
           />
         )}
 
-        {activeTab === 'capacitacion' && (
+        {activeTab === 'capacitacion' && canViewSection('capacitacion') && (
           user ? (
             <TrainingSection
               courses={courses}
@@ -971,12 +1198,12 @@ export default function IntranetApp() {
               isLoggedIn={!!user}
               moduleId="capacitacion"
               onOpenLoginModal={() => openLogin()}
-              onNavigateTab={setActiveTab}
+              onNavigateTab={navigateTab}
             />
           )
         )}
 
-        {activeTab === 'programas' && (
+        {activeTab === 'programas' && canViewSection('programas') && (
           user ? (
             <ProgramsSection
               programs={programs}
@@ -991,18 +1218,19 @@ export default function IntranetApp() {
               isLoggedIn={!!user}
               moduleId="programas"
               onOpenLoginModal={() => openLogin()}
-              onNavigateTab={setActiveTab}
+              onNavigateTab={navigateTab}
             />
           )
         )}
 
-        {activeTab === 'agenda' && (
+        {activeTab === 'agenda' && canViewSection('agenda') && (
           user ? (
             <AgendaSection
               key={agendaTargetDate ? `${agendaTargetDate.getTime()}-${agendaTargetView || 'semana'}` : 'agenda-view'}
               activities={activities}
               resources={resources}
-              onNavigateTab={setActiveTab}
+              onNavigateTab={navigateTab}
+              canViewSection={canViewSection}
               initialDate={agendaTargetDate}
               initialView={agendaTargetView}
               isAdmin={user?.role === 'administrador'}
@@ -1018,6 +1246,7 @@ export default function IntranetApp() {
                 }
               }}
               onSyncEventToGoogleCalendar={handleSyncToCalendar}
+              onOpenCalendarImport={handleOpenCalendarImport}
               onExportToGoogleSheets={handleExportToGoogleSheets}
               hasWorkspaceAuth={!!accessToken}
             />
@@ -1027,12 +1256,12 @@ export default function IntranetApp() {
               isLoggedIn={!!user}
               moduleId="agenda"
               onOpenLoginModal={() => openLogin()}
-              onNavigateTab={setActiveTab}
+              onNavigateTab={navigateTab}
             />
           )
         )}
 
-        {activeTab === 'recursos' && (
+        {activeTab === 'recursos' && canViewSection('recursos') && (
           user ? (
             <ResourcesSection
               resources={resources}
@@ -1047,12 +1276,12 @@ export default function IntranetApp() {
               isLoggedIn={!!user}
               moduleId="recursos"
               onOpenLoginModal={() => openLogin()}
-              onNavigateTab={setActiveTab}
+              onNavigateTab={navigateTab}
             />
           )
         )}
 
-        {activeTab === 'equipo' && (
+        {activeTab === 'equipo' && canViewSection('equipo') && (
           user ? (
             <TeamSection
               team={team}
@@ -1071,12 +1300,12 @@ export default function IntranetApp() {
               isLoggedIn={!!user}
               moduleId="equipo"
               onOpenLoginModal={() => openLogin()}
-              onNavigateTab={setActiveTab}
+              onNavigateTab={navigateTab}
             />
           )
         )}
 
-        {activeTab === 'enlaces' && (
+        {activeTab === 'enlaces' && canViewSection('enlaces') && (
           user ? (
             <LinksSection
               links={quickLinks}
@@ -1090,12 +1319,12 @@ export default function IntranetApp() {
               isLoggedIn={!!user}
               moduleId="enlaces"
               onOpenLoginModal={() => openLogin()}
-              onNavigateTab={setActiveTab}
+              onNavigateTab={navigateTab}
             />
           )
         )}
 
-        {activeTab === 'admin' && (
+        {activeTab === 'admin' && canViewSection('admin') && (
           user?.role === 'administrador' ? (
             <AdminSection
               user={user}
@@ -1112,7 +1341,7 @@ export default function IntranetApp() {
               onOpenUserManagement={() => setIsUserManagementOpen(true)}
               onOpenBackupModal={() => setIsBackupModalOpen(true)}
               onDeleteActivity={handleDeleteActivity}
-              onNavigateTab={setActiveTab}
+              onNavigateTab={navigateTab}
               hasWorkspaceToken={!!accessToken}
               onUpdateActivityStatus={handleUpdateActivityStatus}
               onSyncEventToCalendar={handleSyncToCalendar}
@@ -1126,7 +1355,7 @@ export default function IntranetApp() {
               isLoggedIn={!!user}
               moduleId="admin"
               onOpenLoginModal={() => openLogin()}
-              onNavigateTab={setActiveTab}
+              onNavigateTab={navigateTab}
             />
           )
         )}
@@ -1169,48 +1398,58 @@ export default function IntranetApp() {
                     <span className="font-semibold text-slate-700">{instSettings.techSupportExtension}</span>
                   </li>
                 )}
-                <li>
-                  <button
-                    onClick={() => setActiveTab('recursos')}
-                    className="hover:text-[#0284c7] transition-colors cursor-pointer text-left"
-                  >
-                    Protocolo de Visitas
-                  </button>
-                </li>
-                <li>
-                  <button
-                    onClick={() => setActiveTab('agenda')}
-                    className="hover:text-[#0284c7] transition-colors cursor-pointer text-left"
-                  >
-                    Calendario Parlamentario
-                  </button>
-                </li>
+                {canViewSection('recursos') && (
+                  <li>
+                    <button
+                      onClick={() => navigateTab('recursos')}
+                      className="hover:text-[#0284c7] transition-colors cursor-pointer text-left"
+                    >
+                      Protocolo de Visitas
+                    </button>
+                  </li>
+                )}
+                {canViewSection('agenda') && (
+                  <li>
+                    <button
+                      onClick={() => navigateTab('agenda')}
+                      className="hover:text-[#0284c7] transition-colors cursor-pointer text-left"
+                    >
+                      Calendario Parlamentario
+                    </button>
+                  </li>
+                )}
               </ul>
             </div>
 
-            <div className="space-y-3">
-              <div className="text-[11px] font-bold uppercase tracking-wider text-[#001428]">
-                Documentación
+            {(canViewSection('recursos') || canViewSection('enlaces')) && (
+              <div className="space-y-3">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-[#001428]">
+                  Documentación
+                </div>
+                <ul className="space-y-2 text-xs text-slate-500">
+                  {canViewSection('recursos') && (
+                    <li>
+                      <button
+                        onClick={() => navigateTab('recursos')}
+                        className="hover:text-[#0284c7] transition-colors cursor-pointer text-left"
+                      >
+                        Recursos y documentos institucionales
+                      </button>
+                    </li>
+                  )}
+                  {canViewSection('enlaces') && (
+                    <li>
+                      <button
+                        onClick={() => navigateTab('enlaces')}
+                        className="hover:text-[#0284c7] transition-colors cursor-pointer text-left"
+                      >
+                        Enlaces útiles
+                      </button>
+                    </li>
+                  )}
+                </ul>
               </div>
-              <ul className="space-y-2 text-xs text-slate-500">
-                <li>
-                  <button
-                    onClick={() => setActiveTab('recursos')}
-                    className="hover:text-[#0284c7] transition-colors cursor-pointer text-left"
-                  >
-                    Recursos y documentos institucionales
-                  </button>
-                </li>
-                <li>
-                  <button
-                    onClick={() => setActiveTab('enlaces')}
-                    className="hover:text-[#0284c7] transition-colors cursor-pointer text-left"
-                  >
-                    Enlaces útiles
-                  </button>
-                </li>
-              </ul>
-            </div>
+            )}
 
             <div className="space-y-3">
               <div className="text-[11px] font-bold uppercase tracking-wider text-[#001428]">
@@ -1243,7 +1482,7 @@ export default function IntranetApp() {
 
           <div suppressHydrationWarning className="pt-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-[11px] text-slate-400">
             <div suppressHydrationWarning>
-              © {new Date().getFullYear()} {instSettings.instituteName || 'Instituto de Capacitación Legislativa'} - {instSettings.institutionSubtitle || 'Poder Legislativo'}. {instSettings.copyrightText || 'Todos los derechos reservados.'}
+              © {getInstitutionalTodayParts().year} {instSettings.instituteName || 'Instituto de Capacitación Legislativa'} - {instSettings.institutionSubtitle || 'Poder Legislativo'}. {instSettings.copyrightText || 'Todos los derechos reservados.'}
             </div>
             <div className="flex items-center gap-4">
               <a href="/privacidad" className="hover:text-[#0284c7] transition-colors font-medium">
@@ -1299,6 +1538,21 @@ export default function IntranetApp() {
         hasCalendarAuth={!!accessToken}
         initialAction={quickActionInitial}
         initialDate={quickActionInitialDate}
+      />
+
+      <CalendarImportModal
+        isOpen={isCalendarImportOpen}
+        onClose={() => setIsCalendarImportOpen(false)}
+        accessToken={accessToken}
+        accountEmail={user?.email ?? ''}
+        existingActivities={activities}
+        onImport={handleImportActivities}
+        onAuthError={() => {
+          setIsCalendarImportOpen(false);
+          setAccessToken(null);
+          storeAccessToken(null);
+          showToast('error', 'La conexión con Google Calendar venció. Vuelve a conectar tu cuenta y reintenta la importación.');
+        }}
       />
 
       {AI_ASSISTANT_ENABLED && (

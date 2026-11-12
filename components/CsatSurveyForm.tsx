@@ -42,11 +42,11 @@ export function CsatSurveyForm({ token }: CsatSurveyFormProps) {
     e.preventDefault();
     if (submitting || done) return;
     if (!isValidToken) {
-      setErrorMsg('El enlace de la encuesta no es válido. Pedí a la institución un enlace actualizado.');
+      setErrorMsg('El enlace de la encuesta no es válido. Pide a la institución un enlace actualizado.');
       return;
     }
     if (!rating || rating < 1 || rating > 5) {
-      setErrorMsg('Seleccioná una calificación de 1 a 5 estrellas.');
+      setErrorMsg('Selecciona una calificación de 1 a 5 estrellas.');
       return;
     }
     setErrorMsg(null);
@@ -68,7 +68,7 @@ export function CsatSurveyForm({ token }: CsatSurveyFormProps) {
         // Rechazado por reglas (token inválido/expirado o actividad sin encuesta activa).
         setErrorMsg('Este enlace no corresponde a una encuesta vigente. Solicitá un enlace actualizado a la institución.');
       } else {
-        setErrorMsg('No se pudo enviar tu respuesta. Revisá tu conexión e intentá de nuevo.');
+        setErrorMsg('No se pudo enviar tu respuesta. Revisa tu conexión e intenta de nuevo.');
       }
     } finally {
       setSubmitting(false);
@@ -123,7 +123,7 @@ export function CsatSurveyForm({ token }: CsatSurveyFormProps) {
               Enlace inválido
             </p>
             <p className="text-xs text-rose-700">
-              Este enlace de encuesta no es válido. Contactá al Instituto para recibir el enlace correcto.
+              Este enlace de encuesta no es válido. Contacta al Instituto para recibir el enlace correcto.
             </p>
           </div>
         ) : (

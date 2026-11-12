@@ -82,10 +82,15 @@ service cloud.firestore {
       // Auto-registro: cada usuario crea SOLO su propia ficha.
       //  - pendiente: comportamiento por defecto (espera aprobación del admin).
       //  - aprobado: solo si el modo compartido auto_visitor está activo.
+      //  - solo los campos que escribe el registro (lib/auth.ts → syncAndCheckUserInFirestore): nadie puede
+      //    sembrar en su propia ficha campos que decide Administración (por ejemplo allowedSections).
       allow create: if isMasterAdmin()
         || (isAdmin() && request.resource.data.role != 'administrador')
         || (emailVerified()
             && userEmail == currentEmail()
+            && request.resource.data.keys().hasOnly(['id', 'email', 'displayName', 'role', 'status', 'createdAt', 'approvedAt'])
+            && request.resource.data.displayName is string
+            && request.resource.data.displayName.size() <= 200
             && request.resource.data.role == 'visitante'
             && request.resource.data.email == currentEmail()
             && (request.resource.data.status == 'pendiente'

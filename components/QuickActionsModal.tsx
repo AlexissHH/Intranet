@@ -711,7 +711,7 @@ export function QuickActionsModal({
                   <label htmlFor="qa-field-10" className="block text-xs font-bold text-[#001428] mb-1">Tipo de Actividad</label>
                   <select id="qa-field-10"
                     value={actType}
-                    onChange={(e) => setActType(e.target.value as any)}
+                    onChange={(e) => setActType(e.target.value as typeof actType)}
                     className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none bg-white"
                   >
                     <option value="capacitacion">Capacitación / Taller</option>
@@ -866,7 +866,7 @@ export function QuickActionsModal({
                   <label htmlFor="qa-field-18" className="block text-xs font-bold text-[#001428] mb-1">Categoría</label>
                   <select id="qa-field-18"
                     value={newsCategory}
-                    onChange={(e) => setNewsCategory(e.target.value as any)}
+                    onChange={(e) => setNewsCategory(e.target.value as typeof newsCategory)}
                     className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none bg-white"
                   >
                     <option value="Institucional">Institucional</option>

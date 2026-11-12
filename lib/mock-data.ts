@@ -27,6 +27,10 @@ export interface ActivityItem {
   /** Encuesta CSAT de satisfacción de la visita: token y fecha del último envío. */
   csatSurveyToken?: string;
   csatSurveySentAt?: string;
+  /** Id del evento de Google Calendar vinculado a esta actividad (importada o agendada desde la intranet). */
+  calendarEventId?: string;
+  /** Cuenta de Google cuyo calendario principal contiene ese evento (solo ella puede actualizarlo o cancelarlo). */
+  calendarOwnerEmail?: string;
 }
 
 export type InstituteAreaIconName =

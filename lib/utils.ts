@@ -6,6 +6,29 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export const INSTITUTIONAL_TIMEZONE = 'America/Argentina/Buenos_Aires';
+
+/** Mensaje legible de un error de tipo desconocido (bloques catch): su `message` si es texto, o el texto de respaldo. */
+export function getErrorMessage(err: unknown, fallback: string): string {
+  const message = (err as { message?: unknown } | null)?.message;
+  return typeof message === 'string' && message.trim() ? message : fallback;
+}
+
+/** Código de un error de tipo desconocido (por ejemplo, los de Firebase: 'auth/...'), o null. */
+export function getErrorCode(err: unknown): string | null {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && code ? code : null;
+}
+
+/**
+ * Normaliza una URL externa escrita por un usuario antes de guardarla: lo que no empiece con http(s) recibe
+ * https:// (así un `javascript:` u otro esquema nunca llega a un href). Texto vacío → undefined.
+ */
+export function normalizeExternalUrl(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
 // Argentina no aplica horario de verano (UTC-3 todo el año). Si INSTITUTIONAL_TIMEZONE cambia a una
 // zona con horario de verano, este desfase fijo deja de ser válido y debe calcularse con Intl.
 const INSTITUTIONAL_UTC_OFFSET = '-03:00';
@@ -71,6 +94,32 @@ export function getInstitutionalTodayParts(now: Date = new Date()): {
       month: now.getMonth(),
       day: now.getDate(),
     };
+  }
+}
+
+/**
+ * Fecha (YYYY-MM-DD) y hora (HH:mm) de un instante ISO, expresadas en la zona horaria INSTITUCIONAL
+ * (no en la del navegador). Devuelve null si el texto no es una fecha válida.
+ */
+export function getInstitutionalDateTimeParts(iso: string): { date: string; time: string } | null {
+  const instant = new Date(iso);
+  if (Number.isNaN(instant.getTime())) return null;
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: INSTITUTIONAL_TIMEZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(instant);
+    const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+    const date = `${get('year')}-${get('month')}-${get('day')}`;
+    const time = `${get('hour')}:${get('minute')}`;
+    return /^\d{4}-\d{2}-\d{2}$/.test(date) && /^\d{2}:\d{2}$/.test(time) ? { date, time } : null;
+  } catch {
+    return null;
   }
 }
 

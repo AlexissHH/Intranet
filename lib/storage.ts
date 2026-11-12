@@ -470,6 +470,14 @@ export function saveActivity(activity: ActivityItem): ActivityItem[] {
   return updated;
 }
 
+/** Guarda varias actividades de una vez (una sola escritura y una sola sincronización). */
+export function saveActivities(items: ActivityItem[]): ActivityItem[] {
+  let updated = getActivities();
+  for (const item of items) updated = upsertById(updated, item, 'start');
+  safeSet(STORAGE_KEYS.ACTIVITIES, updated);
+  return updated;
+}
+
 export function deleteActivity(id: string): ActivityItem[] {
   const updated = removeById(getActivities(), id);
   safeSet(STORAGE_KEYS.ACTIVITIES, updated);

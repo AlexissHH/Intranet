@@ -32,6 +32,8 @@ interface HeaderProps {
   onOpenQuickActions: () => void;
   hasWorkspaceToken: boolean;
   onSearch?: (query: string) => void;
+  /** Secciones habilitadas para el usuario: lo no habilitado no se muestra (sin candados ni avisos). */
+  canViewSection?: (tab: string) => boolean;
 }
 
 export function Header({
@@ -46,6 +48,7 @@ export function Header({
   onOpenQuickActions,
   hasWorkspaceToken,
   onSearch,
+  canViewSection = () => true,
 }: HeaderProps) {
   // Vacío hasta montar: antes mostraba una fecha fija inventada en el primer render.
   const [currentDateFormatted, setCurrentDateFormatted] = useState<string>('');
@@ -80,7 +83,7 @@ export function Header({
     ...(user?.role === 'administrador'
       ? [{ id: 'admin', label: 'Panel', restricted: true }]
       : []),
-  ];
+  ].filter((item) => canViewSection(item.id));
 
   return (
     <header className="sticky top-0 z-40 bg-white border-b border-slate-200">
@@ -114,7 +117,8 @@ export function Header({
 
           {user ? (
             <>
-              {/* Search box */}
+              {/* Search box (busca en Recursos: solo si esa sección está habilitada) */}
+              {canViewSection('recursos') && (
               <div className="relative flex-1 max-w-sm">
                 <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
@@ -129,6 +133,7 @@ export function Header({
                   className="w-full text-xs pl-8 pr-3 py-1.5 bg-slate-100/70 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#0284c7] focus:bg-white text-slate-800 placeholder-slate-400 transition-colors"
                 />
               </div>
+              )}
 
               {/* Workspace Integrations Toolbar */}
               <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg text-[10px] text-slate-500 font-bold">
@@ -177,8 +182,8 @@ export function Header({
             </button>
           )}
 
-          {/* Notification Bell (only for authenticated users) */}
-          {user && (
+          {/* Notification Bell (only for authenticated users with Agenda enabled) */}
+          {user && canViewSection('agenda') && (
             <button
               onClick={() => setActiveTab('agenda')}
               className="relative p-1.5 text-slate-500 hover:text-slate-800 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"

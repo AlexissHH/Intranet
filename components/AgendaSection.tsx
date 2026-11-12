@@ -44,6 +44,7 @@ import { getLocalDateString, getInstitutionalTodayParts, isWeekendDay, getWeeken
 import { getEffectiveActivityStatus as getEffectiveStatus, getInstitutionalNowStamp } from '@/lib/metrics';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
+import type { IntranetSectionId } from '@/lib/access-config';
 import {
   downloadMonthlySchedulePdf,
   downloadActivitySheetPdf,
@@ -58,6 +59,8 @@ interface AgendaSectionProps {
   onOpenNewActivityModal: (initialDate?: string) => void;
   onSyncEventToGoogleCalendar: (activity: ActivityItem) => void;
   onExportToGoogleSheets: () => void;
+  /** Abre la importación puntual desde Google Calendar (solo administradores). */
+  onOpenCalendarImport?: () => void;
   hasWorkspaceAuth: boolean;
   initialDate?: Date;
   initialView?: 'dia' | 'semana' | 'mes' | 'lista';
@@ -69,6 +72,8 @@ interface AgendaSectionProps {
   onDeleteActivity?: (id: string) => void;
   /** Abre el composer de Gmail del sistema con destinatario/asunto/cuerpo pre-armados. */
   onOpenEmailModal?: (to: string, subject: string, body: string) => void;
+  /** Secciones habilitadas para el usuario: la tarjeta de Protocolo y Recursos solo aparece con Recursos habilitado. */
+  canViewSection?: (section: IntranetSectionId) => boolean;
 }
 
 function getNextBusinessDay(current: Date): Date {
@@ -127,6 +132,7 @@ export function AgendaSection({
   onOpenNewActivityModal,
   onSyncEventToGoogleCalendar,
   onExportToGoogleSheets,
+  onOpenCalendarImport,
   hasWorkspaceAuth,
   initialDate,
   initialView,
@@ -135,6 +141,7 @@ export function AgendaSection({
   onUpdateActivityFull,
   onDeleteActivity,
   onOpenEmailModal,
+  canViewSection = () => true,
 }: AgendaSectionProps) {
   const [activeTab, setActiveTab] = useState<'todas' | 'visita' | 'capacitacion' | 'sesion' | 'coordinacion'>('todas');
   const [activeView, setActiveView] = useState<'dia' | 'semana' | 'mes' | 'lista'>(initialView || 'semana');
@@ -250,7 +257,7 @@ export function AgendaSection({
     const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const cleanEmail = (activityInput.contactEmail || '').trim().toLowerCase();
     if (!cleanEmail || !EMAIL_RE.test(cleanEmail)) {
-      setCsurveyEmailError('Ingresá un email válido de la institución para enviar la encuesta.');
+      setCsurveyEmailError('Ingresa un email válido de la institución para enviar la encuesta.');
       return false;
     }
     setCsurveyEmailError(null);
@@ -728,6 +735,17 @@ export function AgendaSection({
             <RefreshCw className="w-3.5 h-3.5 text-[#0284c7]" />
             <span>Google Calendar</span>
           </button>
+
+          {isAdmin && onOpenCalendarImport && (
+            <button
+              onClick={onOpenCalendarImport}
+              className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 text-xs font-bold rounded shadow-xs transition-colors cursor-pointer"
+              title="Traer a la agenda las próximas actividades de Google Calendar (con vista previa)"
+            >
+              <Download className="w-3.5 h-3.5 text-[#0284c7]" />
+              <span>Importar de Calendar</span>
+            </button>
+          )}
 
           <button
             onClick={onExportToGoogleSheets}
@@ -2118,6 +2136,7 @@ export function AgendaSection({
             </div>
           </div>
 
+          {canViewSection('recursos') && (
           <div className="bg-white rounded-lg border border-slate-200 p-4 sm:p-5 shadow-2xs space-y-3.5">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
               <div className="flex items-center gap-2">
@@ -2242,6 +2261,7 @@ export function AgendaSection({
               )}
             </div>
           </div>
+          )}
         </div>
       </div>
 
@@ -2740,7 +2760,7 @@ export function AgendaSection({
                         const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
                         const cleanEmail = csatEmailInput.trim().toLowerCase();
                         if (!cleanEmail || !EMAIL_RE.test(cleanEmail)) {
-                          setCsurveyEmailError('Ingresá un email válido de la institución para enviar la encuesta.');
+                          setCsurveyEmailError('Ingresa un email válido de la institución para enviar la encuesta.');
                           return;
                         }
                         openCsatEmailFor({ ...selectedActivity, contactEmail: cleanEmail });

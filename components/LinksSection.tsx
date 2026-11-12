@@ -18,8 +18,10 @@ import {
   Edit2,
 } from 'lucide-react';
 import { QuickLink } from '@/lib/mock-data';
+import { normalizeExternalUrl } from '@/lib/utils';
 import { useBottomSheetDrag } from '@/lib/useBottomSheetDrag';
 import { BottomSheetHandle } from '@/components/BottomSheetHandle';
+import { ConfirmationModal } from '@/components/ConfirmationModal';
 
 const LINK_ICON_OPTIONS = [
   {
@@ -104,6 +106,8 @@ export function LinksSection({
   const [selectedCat, setSelectedCat] = useState<string>('todos');
   const [isNewLinkModalOpen, setIsNewLinkModalOpen] = useState(false);
   const [editingLink, setEditingLink] = useState<QuickLink | null>(null);
+  /** Enlace a eliminar: la baja pide confirmación (se quita para todos los usuarios). */
+  const [linkToDelete, setLinkToDelete] = useState<QuickLink | null>(null);
 
   const [newTitle, setNewTitle] = useState('');
   const [newUrl, setNewUrl] = useState('');
@@ -189,10 +193,8 @@ export function LinksSection({
     e.preventDefault();
     if (!newTitle.trim() || !newUrl.trim()) return;
 
-    let formattedUrl = newUrl.trim();
-    if (!/^https?:\/\//i.test(formattedUrl)) {
-      formattedUrl = 'https://' + formattedUrl;
-    }
+    const formattedUrl = normalizeExternalUrl(newUrl);
+    if (!formattedUrl) return;
 
     const linkObj: QuickLink = {
       id: editingLink ? editingLink.id : 'link-' + Date.now(),
@@ -306,7 +308,7 @@ export function LinksSection({
                     </button>
                     <button
                       type="button"
-                      onClick={() => onDeleteLink(item.id)}
+                      onClick={() => setLinkToDelete(item)}
                       title="Eliminar acceso directo"
                       aria-label={`Eliminar ${item.title}`}
                       className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
@@ -399,7 +401,7 @@ export function LinksSection({
                 <label className="block text-xs font-bold text-[#001428] mb-1">Categoría</label>
                 <select
                   value={newCategory}
-                  onChange={(e: any) => setNewCategory(e.target.value)}
+                  onChange={(e) => setNewCategory(e.target.value as typeof newCategory)}
                   className="w-full text-xs p-2 rounded border border-slate-300 focus:ring-1 focus:ring-[#0284c7] focus:outline-none bg-white font-medium"
                 >
                   <option value="Google Workspace">Google Workspace</option>
@@ -483,6 +485,20 @@ export function LinksSection({
           </div>
         </div>
       )}
+
+      <ConfirmationModal
+        isOpen={Boolean(linkToDelete)}
+        title="Eliminar acceso directo"
+        description={`¿Seguro que quieres eliminar "${linkToDelete?.title ?? ''}"? Se quita para todos los usuarios y no se puede deshacer.`}
+        confirmLabel="Eliminar"
+        cancelLabel="Cancelar"
+        isDestructive={true}
+        onConfirm={() => {
+          if (linkToDelete) onDeleteLink(linkToDelete.id);
+          setLinkToDelete(null);
+        }}
+        onCancel={() => setLinkToDelete(null)}
+      />
     </div>
   );
 }
